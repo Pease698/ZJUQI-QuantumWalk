@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="450" viewBox="0 0 1120 450">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title{font:700 30px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .text{font:18px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .small{font:15px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#475569}
+      .box{fill:#fff;stroke:#334155;stroke-width:2;rx:10}
+      .q{fill:#eef2ff;stroke:#4f46e5;stroke-width:2;rx:10}
+      .r{fill:#ecfdf5;stroke:#059669;stroke-width:2;rx:10}
+      .s{fill:#fff7ed;stroke:#ea580c;stroke-width:2;rx:10}
+      .arrow{stroke:#1f2937;stroke-width:2.4;fill:none;marker-end:url(#arrow)}
+      .barbg{fill:#e5e7eb}.barq{fill:#6366f1}.barr{fill:#10b981}.bars{fill:#f97316}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1120" height="450" fill="#fff"/>
+  <text x="560" y="46" text-anchor="middle" class="title">候选集合约束与量子—经典混合评分</text>
+  <rect x="50" y="92" width="220" height="110" class="box"/>
+  <text x="160" y="128" text-anchor="middle" class="text">当前解 S</text>
+  <text x="160" y="158" text-anchor="middle" class="small">已选节点满足任务约束</text>
+  <text x="160" y="184" text-anchor="middle" class="small">最大团或密集子图</text>
+  <rect x="340" y="92" width="240" height="110" class="box"/>
+  <text x="460" y="128" text-anchor="middle" class="text">候选集合 C(S)</text>
+  <text x="460" y="158" text-anchor="middle" class="small">过滤非法节点</text>
+  <text x="460" y="184" text-anchor="middle" class="small">只在候选集中做选择</text>
+  <rect x="650" y="76" width="190" height="82" class="q"/>
+  <text x="745" y="112" text-anchor="middle" class="text">量子评分 Q</text>
+  <text x="745" y="138" text-anchor="middle" class="small">全局传播信号</text>
+  <rect x="650" y="190" width="190" height="82" class="r"/>
+  <text x="745" y="226" text-anchor="middle" class="text">经典评分 R</text>
+  <text x="745" y="252" text-anchor="middle" class="small">局部结构约束</text>
+  <rect x="910" y="116" width="160" height="116" class="s"/>
+  <text x="990" y="152" text-anchor="middle" class="text">最终分数</text>
+  <text x="990" y="182" text-anchor="middle" class="small">αQ̃+(1-α)R̃</text>
+  <text x="990" y="208" text-anchor="middle" class="small">选择 v*</text>
+  <path d="M270 147 H340" class="arrow"/>
+  <path d="M580 147 H650" class="arrow"/>
+  <path d="M840 117 C870 118 890 135 910 157" class="arrow"/>
+  <path d="M840 231 C874 226 892 204 910 185" class="arrow"/>
+  <path d="M990 232 C990 292 877 336 760 336 H254 C190 336 160 292 160 202" class="arrow"/>
+  <text x="560" y="365" text-anchor="middle" class="small">下一轮更新 S 后重新构造候选集、哈密顿量和评分</text>
+  <rect x="360" y="256" width="150" height="20" class="barbg"/>
+  <rect x="360" y="256" width="104" height="20" class="barq"/>
+  <text x="526" y="272" class="small">Q̃(v)</text>
+  <rect x="360" y="292" width="150" height="20" class="barbg"/>
+  <rect x="360" y="292" width="80" height="20" class="barr"/>
+  <text x="526" y="308" class="small">R̃(v)</text>
+  <rect x="360" y="328" width="150" height="20" class="barbg"/>
+  <rect x="360" y="328" width="94" height="20" class="bars"/>
+  <text x="526" y="344" class="small">Score(v)</text>
+</svg>

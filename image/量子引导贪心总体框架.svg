@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title{font:700 30px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .box{fill:#fff;stroke:#334155;stroke-width:2;rx:10}
+      .soft{fill:#f8fafc;stroke:#94a3b8;stroke-width:2;rx:10}
+      .quantum{fill:#eef2ff;stroke:#4f46e5;stroke-width:2;rx:10}
+      .classic{fill:#ecfdf5;stroke:#059669;stroke-width:2;rx:10}
+      .text{font:18px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .small{font:15px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#475569}
+      .label{font:16px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#1f2937}
+      .arrow{stroke:#1f2937;stroke-width:2.4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1120" height="430" fill="#fff"/>
+  <text x="560" y="46" text-anchor="middle" class="title">量子全局视野 + 经典局部贪心的双层架构</text>
+  <rect x="48" y="112" width="155" height="96" class="box"/>
+  <text x="126" y="148" text-anchor="middle" class="text">输入图</text>
+  <text x="126" y="178" text-anchor="middle" class="small">G=(V,E), A</text>
+  <rect x="258" y="88" width="210" height="145" class="quantum"/>
+  <text x="363" y="124" text-anchor="middle" class="text">量子游走内核</text>
+  <text x="363" y="155" text-anchor="middle" class="small">构造 H=A+λΣ|u&gt;&lt;u|</text>
+  <text x="363" y="182" text-anchor="middle" class="small">演化 |ψ(t)&gt;=e^{-iHt}|ψ₀&gt;</text>
+  <text x="363" y="209" text-anchor="middle" class="small">输出概率 Pᵥ(t)</text>
+  <rect x="538" y="88" width="210" height="145" class="classic"/>
+  <text x="643" y="124" text-anchor="middle" class="text">经典约束模块</text>
+  <text x="643" y="155" text-anchor="middle" class="small">构造候选集 C(S)</text>
+  <text x="643" y="182" text-anchor="middle" class="small">计算局部评分 R(v,S)</text>
+  <text x="643" y="209" text-anchor="middle" class="small">保证解满足任务约束</text>
+  <rect x="818" y="88" width="240" height="145" class="soft"/>
+  <text x="938" y="124" text-anchor="middle" class="text">混合决策</text>
+  <text x="938" y="155" text-anchor="middle" class="small">Score=αQ̃+(1-α)R̃</text>
+  <text x="938" y="182" text-anchor="middle" class="small">选择最高分节点 v*</text>
+  <text x="938" y="209" text-anchor="middle" class="small">更新 S ← S∪{v*}</text>
+  <rect x="378" y="302" width="365" height="78" class="box"/>
+  <text x="560" y="334" text-anchor="middle" class="text">输出结果</text>
+  <text x="560" y="362" text-anchor="middle" class="small">最大团 / 密集子图 / 目标函数值</text>
+  <path d="M203 160 H258" class="arrow"/>
+  <path d="M468 160 H538" class="arrow"/>
+  <path d="M748 160 H818" class="arrow"/>
+  <path d="M938 233 C938 286 790 341 743 341" class="arrow"/>
+  <path d="M818 232 C760 275 690 301 623 303" class="arrow"/>
+  <path d="M440 302 C330 266 280 241 278 210" class="arrow"/>
+  <text x="276" y="283" text-anchor="middle" class="label">下一轮以当前 S 引导演化</text>
+  <text x="589" y="271" text-anchor="middle" class="label">候选约束防止非法选择</text>
+</svg>

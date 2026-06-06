@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="480" viewBox="0 0 1120 480">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title{font:700 30px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .text{font:18px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .small{font:15px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#475569}
+      .panel{fill:#fff;stroke:#334155;stroke-width:2;rx:10}
+      .edge{stroke:#94a3b8;stroke-width:3}
+      .edge2{stroke:#6366f1;stroke-width:4;stroke-dasharray:8 8}
+      .node{stroke:#1f2937;stroke-width:2}
+      .seed{fill:#f97316}.target{fill:#6366f1}.background{fill:#e5e7eb}
+      .arrow{stroke:#1f2937;stroke-width:2.4;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1120" height="480" fill="#fff"/>
+  <text x="560" y="46" text-anchor="middle" class="title">连续时间量子游走如何形成全局概率信号</text>
+  <rect x="50" y="82" width="470" height="330" class="panel"/>
+  <rect x="600" y="82" width="470" height="330" class="panel"/>
+  <text x="285" y="120" text-anchor="middle" class="text">经典局部指标</text>
+  <text x="835" y="120" text-anchor="middle" class="text">CTQW 概率传播</text>
+  <line x1="165" y1="220" x2="245" y2="178" class="edge"/>
+  <line x1="245" y1="178" x2="330" y2="218" class="edge"/>
+  <line x1="330" y1="218" x2="245" y2="282" class="edge"/>
+  <line x1="245" y1="282" x2="165" y2="220" class="edge"/>
+  <line x1="330" y1="218" x2="410" y2="282" class="edge"/>
+  <line x1="245" y1="178" x2="245" y2="282" class="edge"/>
+  <circle cx="165" cy="220" r="22" class="node seed"/>
+  <circle cx="245" cy="178" r="19" class="node target"/>
+  <circle cx="330" cy="218" r="19" class="node target"/>
+  <circle cx="245" cy="282" r="19" class="node target"/>
+  <circle cx="410" cy="282" r="17" class="node background"/>
+  <text x="285" y="342" text-anchor="middle" class="small">只看当前节点附近的度数或连接数</text>
+  <text x="285" y="368" text-anchor="middle" class="small">容易忽略多跳路径与整体拓扑关系</text>
+  <line x1="715" y1="220" x2="795" y2="178" class="edge"/>
+  <line x1="795" y1="178" x2="885" y2="216" class="edge"/>
+  <line x1="885" y1="216" x2="795" y2="285" class="edge"/>
+  <line x1="795" y1="285" x2="715" y2="220" class="edge"/>
+  <line x1="885" y1="216" x2="958" y2="282" class="edge"/>
+  <line x1="795" y1="178" x2="795" y2="285" class="edge"/>
+  <line x1="715" y1="220" x2="885" y2="216" class="edge2"/>
+  <line x1="715" y1="220" x2="795" y2="285" class="edge2"/>
+  <line x1="795" y1="178" x2="958" y2="282" class="edge2"/>
+  <circle cx="715" cy="220" r="24" class="node seed"/>
+  <circle cx="795" cy="178" r="31" class="node target"/>
+  <circle cx="885" cy="216" r="33" class="node target"/>
+  <circle cx="795" cy="285" r="29" class="node target"/>
+  <circle cx="958" cy="282" r="18" class="node background"/>
+  <path d="M705 160 C772 105 894 120 920 176" class="arrow"/>
+  <path d="M720 286 C785 348 896 340 940 302" class="arrow"/>
+  <text x="835" y="342" text-anchor="middle" class="small">概率幅沿多条路径相干传播并发生干涉</text>
+  <text x="835" y="368" text-anchor="middle" class="small">密集区域更可能形成较高的观测概率</text>
+  <circle cx="364" cy="430" r="9" class="node seed"/>
+  <text x="382" y="436" class="small">当前种子</text>
+  <circle cx="500" cy="430" r="9" class="node target"/>
+  <text x="518" y="436" class="small">目标密集区域</text>
+  <circle cx="682" cy="430" r="9" class="node background"/>
+  <text x="700" y="436" class="small">背景节点</text>
+</svg>

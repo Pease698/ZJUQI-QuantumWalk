@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title{font:700 30px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .text{font:18px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#111827}
+      .small{font:15px Arial,'Noto Sans SC','Microsoft YaHei',sans-serif;fill:#475569}
+      .axis{stroke:#1f2937;stroke-width:2.4;fill:none;marker-end:url(#arrow)}
+      .grid{stroke:#e5e7eb;stroke-width:1}
+      .curve{stroke:#f97316;stroke-width:5;fill:none}
+      .base{stroke:#059669;stroke-width:3;stroke-dasharray:8 8}
+      .pure{stroke:#4f46e5;stroke-width:3;stroke-dasharray:8 8}
+      .band{fill:#ffedd5;opacity:.85}
+      .dot{fill:#f97316;stroke:#7c2d12;stroke-width:2}
+    </style>
+  </defs>
+  <rect width="1120" height="520" fill="#fff"/>
+  <text x="560" y="48" text-anchor="middle" class="title">参数敏感性分析的预期现象示意</text>
+
+  <line x1="160" y1="410" x2="930" y2="410" class="axis"/>
+  <line x1="160" y1="410" x2="160" y2="95" class="axis"/>
+  <text x="545" y="466" text-anchor="middle" class="text">量子信息权重 α</text>
+  <text x="82" y="250" text-anchor="middle" class="text" transform="rotate(-90 82 250)">平均解质量 / 成功率</text>
+
+  <line x1="160" y1="340" x2="930" y2="340" class="grid"/>
+  <line x1="160" y1="270" x2="930" y2="270" class="grid"/>
+  <line x1="160" y1="200" x2="930" y2="200" class="grid"/>
+  <line x1="160" y1="130" x2="930" y2="130" class="grid"/>
+  <line x1="314" y1="410" x2="314" y2="95" class="grid"/>
+  <line x1="468" y1="410" x2="468" y2="95" class="grid"/>
+  <line x1="622" y1="410" x2="622" y2="95" class="grid"/>
+  <line x1="776" y1="410" x2="776" y2="95" class="grid"/>
+
+  <rect x="435" y="118" width="225" height="292" class="band"/>
+  <text x="548" y="116" text-anchor="middle" class="small">较稳定的混合区间</text>
+
+  <path d="M160 315 C250 305 338 250 430 184 C520 120 602 112 690 168 C780 225 850 282 930 300" class="curve"/>
+  <line x1="160" y1="315" x2="930" y2="315" class="base"/>
+  <line x1="160" y1="300" x2="930" y2="300" class="pure"/>
+
+  <circle cx="160" cy="315" r="7" class="dot"/>
+  <circle cx="930" cy="300" r="7" class="dot"/>
+  <circle cx="560" cy="125" r="8" class="dot"/>
+
+  <text x="160" y="436" text-anchor="middle" class="small">0</text>
+  <text x="314" y="436" text-anchor="middle" class="small">0.25</text>
+  <text x="468" y="436" text-anchor="middle" class="small">0.5</text>
+  <text x="622" y="436" text-anchor="middle" class="small">0.75</text>
+  <text x="930" y="436" text-anchor="middle" class="small">1</text>
+
+  <text x="965" y="319" class="small">纯经典基线</text>
+  <text x="965" y="304" class="small">纯量子评分</text>
+  <text x="965" y="178" class="small">混合评分曲线</text>
+  <text x="545" y="493" text-anchor="middle" class="small">实际实验不要求曲线一定如此；该图只说明需要检查 α 是否存在中间最优区间。</text>
+</svg>
