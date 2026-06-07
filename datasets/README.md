@@ -260,7 +260,9 @@ python generate_all.py --dry-run     # 仅打印生成计划，不实际生成
 
 ### 可视化某个实例
 
-将测试数据 JSON 文件绘制为图，答案子图以红色高亮显示：
+`visualize.py` 支持两种模式：**基础模式**（答案高亮）和 **CTQW 模式**（概率热力图）。
+
+#### 基础模式：答案子图高亮
 
 ```bash
 # 人工数据（交互式显示）
@@ -282,6 +284,48 @@ python visualize.py <json_path> --figsize 20,15
 - 节点大小按度缩放：度数越高，节点越大
 - 图例标注答案节点数、背景节点等信息
 - 标题包含 sample_id 和所有生成参数
+
+#### CTQW 模式：概率热力图（`--ctqw`）
+
+启用 `--ctqw` 后，脚本将计算连续时间量子游走的节点概率分布，并生成**双图对比布局**：
+
+- **左图**：传统答案高亮（同基础模式）
+- **右图**：CTQW 概率热力图
+  - 节点颜色：浅黄（低概率）→ 深红（高概率），使用 YlOrRd colormap
+  - 答案节点额外添加红色边框高亮
+  - 右侧 colorbar 显示概率数值映射
+  - 标题显示 Ratio = Mean(P_target) / Mean(P_background)
+
+**控制台输出**：
+- 目标节点 / 背景节点的平均概率
+- Ratio 指标（如果 Ratio > 1，说明 CTQW 概率在目标区域存在集中）
+
+```bash
+# 启用 CTQW 概率着色模式
+python visualize.py data/artificial/maximum_clique/mc_n30_p01_k5/mc_n30_p01_k5_000.json --ctqw
+
+# 自定义 CTQW 参数
+python visualize.py <json_path> --ctqw --ctqw-t 2.0 --ctqw-lam 0.5
+
+# 指定初态方式
+python visualize.py <json_path> --ctqw --ctqw-init uniform
+
+# 保存为图片，隐藏标签
+python visualize.py <json_path> --ctqw --save ctqw_fig.png --no-labels
+```
+
+**CTQW 参数说明**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--ctqw` | 启用 CTQW 模式 | — |
+| `--ctqw-t` | 演化时间 | 1.0 |
+| `--ctqw-lam` | 种子扰动强度 λ | 0.0 |
+| `--ctqw-init` | 初态方式: uniform / max_degree / random | max_degree |
+
+> 注意：CTQW 模式当前使用 `src.scoring.QuantumScorer` 的占位实现（返回均匀随机概率）。
+> 当 CTQW 演化计算模块完成后，此脚本会随 `QuantumScorer` 的更新自动使用真实概率分布，
+> 无需修改本脚本。
 
 ### 在代码中加载
 
