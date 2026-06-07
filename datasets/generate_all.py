@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from generators.planted_clique import generate_clique_batch
 from generators.planted_dense import generate_dense_batch
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "artificial")
 
 # ============================================================
 # 参数矩阵定义
