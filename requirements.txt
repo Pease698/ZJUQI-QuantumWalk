@@ -1,0 +1,16 @@
+# Quantum-guided Greedy Algorithm -- project dependencies
+#
+# Install: pip install -r requirements.txt
+
+# Matrix operations, eigenvalue decomposition, CTQW state vectors
+numpy>=1.24
+
+# Matrix exponential scipy.linalg.expm for CTQW evolution e^{-iHt}
+# Sparse matrices for large-graph Krylov subspace approximation
+scipy>=1.11
+
+# Graph construction, layout algorithms, classical graph algorithm baselines
+networkx>=3.1
+
+# CTQW probability distribution plots, experiment result figures, test data visualization
+matplotlib>=3.7
