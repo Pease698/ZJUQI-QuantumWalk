@@ -13,28 +13,27 @@ Algorithm: Quantum-guided Greedy Algorithm
   8. 选择评分最高节点加入 S
   9. 重复直到停止条件满足
 
-当前状态：CTQW 计算模块（步骤 3-6）为占位实现。
-待 CTQW 模块完成后，替换 __ctqw_probabilities 方法即可。
+CTQW 计算通过 scipy.linalg.expm 实现矩阵指数运算。
 """
 
 import time
 
 import numpy as np
+from scipy.linalg import expm
 
 from .base import BaseAlgorithm, AlgorithmResult
 from ..graph_utils import GraphInstance
 from ..candidate_set import CandidateSetBuilder
-from ..scoring import Scorer, QuantumScorer, ClassicalCliqueScorer, \
-    ClassicalDenseScorer
+from ..scoring import ClassicalCliqueScorer, ClassicalDenseScorer
 from ..hamiltonian import construct_hamiltonian
 from ..initial_state import build_initial_state
 
 
 class QuantumGuidedGreedy(BaseAlgorithm):
-    """量子引导贪心算法。
+    """量子引导贪心算法（理论 §12 完整算法流程）。
 
-    理论 §12 的完整算法流程。当前 CTQW 演化部分为占位实现，
-    使用随机概率替代真实量子概率，保证框架可以端到端运行。
+    每一轮选择都重新构造哈密顿量、初始态并演化 CTQW，
+    因此量子评分会随当前部分解 S 动态变化（不是一次性静态排名）。
     """
 
     def __init__(self, candidate_builder: CandidateSetBuilder,
@@ -49,9 +48,9 @@ class QuantumGuidedGreedy(BaseAlgorithm):
             candidate_builder: 候选集合构造器。
             t: CTQW 演化时间。
             lam: 扰动强度 λ。
-            init_method: 初态初始化方式。
-            alpha: 混合评分权重。
-            seed: 随机种子（占位实现使用）。
+            init_method: 初态初始化方式（uniform / max_degree / random）。
+            alpha: 混合评分权重，α=0 纯经典，α=1 纯量子。
+            seed: 随机种子（仅 init_method='random' 时影响初态选择）。
         """
         super().__init__(candidate_builder, scorer=None, name=name)
         self.t = t
@@ -68,17 +67,14 @@ class QuantumGuidedGreedy(BaseAlgorithm):
         all_nodes = set(range(instance.num_nodes))
         n = instance.num_nodes
 
-        # 选择经典评分器
+        # 选择经典评分器（按任务类型）
         if instance.task_type == "maximum_clique":
             classical_scorer = ClassicalCliqueScorer()
         else:
             classical_scorer = ClassicalDenseScorer()
 
-        quantum_scorer = QuantumScorer(
-            t=self.t, lam=self.lam,
-            init_method=self.init_method, seed=self.seed)
-
         # 初始化种子集合（理论 §6）
+        # max_degree 模式下从度数最高节点出发；其他情况留空，由候选集合首轮全开
         S: set[int] = set()
         if self.init_method == "max_degree" and len(all_nodes) > 0:
             degrees = adjacency.sum(axis=1)
@@ -87,7 +83,13 @@ class QuantumGuidedGreedy(BaseAlgorithm):
 
         history: list[dict] = []
         iterations = 0
-        rng = np.random.RandomState(self.seed)
+
+        # 密集子图任务的目标大小（理论 §7.2）
+        # MC 任务终止于"候选集合为空"；DS 任务的候选集合定义宽松，
+        # 需要显式停在 |S|=k 处。answer_size 即植入子图大小。
+        target_size = None
+        if instance.task_type == "densest_subgraph":
+            target_size = instance.parameters.get("answer_size")
 
         while True:
             # 1. 构造候选集合 C(S)
@@ -96,36 +98,35 @@ class QuantumGuidedGreedy(BaseAlgorithm):
             if not candidates:
                 break
 
-            # 2. 构造哈密顿量 H（理论 §5）
-            H = construct_hamiltonian(adjacency, S, self.lam)
+            # DS 任务额外终止条件：达到目标大小
+            if target_size is not None and len(S) >= target_size:
+                break
 
-            # 3. 构造初始态 |ψ₀⟩（理论 §6）
-            psi0 = build_initial_state(n, S, adjacency, self.init_method)
+            # 2-5. CTQW 演化得到节点概率分布 P_v(t)
+            quantum_probs = self._compute_ctqw_probs(
+                adjacency, S, n)
 
-            # 4-5. CTQW 演化 + 量子概率计算
-            # TODO: 替换为真实的 exp(-iHt)|ψ₀⟩ 计算
-            quantum_probs = self._placeholder_ctqw(H, psi0, n, rng)
-
-            # 6. 计算量子评分 Q(v,S)
+            # 6. 量子评分 Q(v,S) —— 仅在候选节点上取值
             q_scores = {v: quantum_probs[v] for v in candidates}
 
-            # 7. 计算经典评分 R(v,S)
+            # 7. 经典评分 R(v,S)
             r_scores = classical_scorer.score_all(candidates, S, instance)
 
-            # 8. 归一化 + 混合评分 Score(v,S) = α·Q_norm + (1-α)·R_norm
+            # 8. min-max 归一化（理论 §8.3，仅在候选集合上计算）
             q_norm = _minmax_normalize(q_scores)
             r_norm = _minmax_normalize(r_scores)
 
+            # 9. 混合评分 Score(v,S) = α·Q_norm + (1-α)·R_norm
             combined = {
                 v: self.alpha * q_norm.get(v, 0.0)
                 + (1 - self.alpha) * r_norm.get(v, 0.0)
                 for v in candidates
             }
 
-            # 9. 选择最高分节点
+            # 10. 选择最高分节点
             best_v = max(candidates, key=lambda v: combined[v])
 
-            # 10. 更新
+            # 11. 更新 S
             S.add(best_v)
 
             history.append({
@@ -159,20 +160,38 @@ class QuantumGuidedGreedy(BaseAlgorithm):
                           "init_method": self.init_method},
         )
 
-    @staticmethod
-    def _placeholder_ctqw(H: np.ndarray, psi0: np.ndarray,
-                          n: int, rng: np.random.RandomState) -> np.ndarray:
-        """CTQW 占位实现：返回均匀随机概率分布。
+    def _compute_ctqw_probs(self, adjacency: np.ndarray,
+                            S: set[int], n: int) -> np.ndarray:
+        """计算 CTQW 节点概率分布 P_v(t) = |⟨v|e^{-iHt}|ψ₀⟩|²。
 
-        TODO: 替换为 |ψ(t)⟩ = scipy.linalg.expm(-1j * H * t) @ psi0
-              然后 P_v = |⟨v|ψ(t)⟩|²
+        参数:
+            adjacency: n×n 邻接矩阵。
+            S: 当前已选节点集合（影响哈密顿量扰动项和初始态）。
+            n: 节点总数。
+
+        返回:
+            长度为 n 的实数数组，probs[v] = 节点 v 的 CTQW 概率，
+            满足 Σ probs[v] = 1。
         """
-        probs = rng.rand(n)
-        return probs / probs.sum()
+        # 1. 构造哈密顿量 H = A + λ·Σ_{u∈S}|u⟩⟨u|（理论 §5）
+        H = construct_hamiltonian(adjacency, S, self.lam)
+
+        # 2. 构造初始态 |ψ₀⟩（理论 §6）
+        psi0 = build_initial_state(n, S, adjacency, self.init_method)
+
+        # 3. 演化算子 U(t) = exp(-iHt)，幺正矩阵
+        U = expm(-1j * H * self.t)
+
+        # 4. 演化态 |ψ(t)⟩ = U|ψ₀⟩
+        psi_t = U @ psi0
+
+        # 5. 节点概率 P_v(t) = |ψ_v(t)|²（满足 Σ P_v = 1）
+        return np.abs(psi_t) ** 2
 
 
 def _minmax_normalize(scores: dict[int, float],
                        eps: float = 1e-10) -> dict[int, float]:
+    """Min-max 归一化（理论 §8.3）。"""
     if not scores:
         return {}
     values = list(scores.values())
@@ -184,6 +203,7 @@ def _minmax_normalize(scores: dict[int, float],
 
 
 def _compute_density(edge_set: set, nodes: list[int]) -> float:
+    """计算节点集合的子图密度 ρ(S)（理论 §2.2）。"""
     k = len(nodes)
     if k <= 1:
         return 1.0

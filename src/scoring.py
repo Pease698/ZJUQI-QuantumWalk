@@ -10,12 +10,17 @@
   - Scorer 是统一接口，所有评分函数实现 score() 和 score_all()
   - HybridScorer 是组合器，接受任意两个 Scorer + alpha 权重
   - 归一化在 HybridScorer 内部完成（min-max，仅在候选集合上计算）
-  - QuantumScorer 当前为占位实现，待 CTQW 模块完成后替换
+  - QuantumScorer 用 scipy.linalg.expm 计算真实 CTQW 概率演化
 """
 
 from abc import ABC, abstractmethod
 
 import numpy as np
+from scipy.linalg import expm
+
+# 真实 CTQW 计算依赖：哈密顿量构造（§5）和初态构造（§6）
+from .hamiltonian import construct_hamiltonian
+from .initial_state import build_initial_state
 
 
 class Scorer(ABC):
@@ -152,12 +157,20 @@ class ClassicalDegreeScorer(Scorer):
 # ============================================================
 
 class QuantumScorer(Scorer):
-    """纯量子概率评分（理论 §8.2）—— 当前为占位实现。
+    """纯量子概率评分（理论 §8.2）—— 真实 CTQW 实现。
 
-    Q(v,S) = P_v(t) = |⟨v|e^{-iHt}|ψ₀⟩|²
+    评分公式：
+        Q(v, S) = P_v(t) = |⟨v | e^{-iHt} | ψ₀⟩|²
 
-    占位实现返回候选集合上的均匀随机评分，保证框架可运行。
-    后续 CTQW 模块完成后替换为真实计算。
+    其中：
+      - H  = A + λ·Σ_{u∈S}|u⟩⟨u|  哈密顿量（理论 §5）
+      - |ψ₀⟩ 初始态（理论 §6，S 非空时为种子集合上的均匀叠加）
+      - t  演化时间
+      - λ  种子扰动强度
+
+    注意：seed 参数仅在 S 为空且 init_method='random' 时影响初始态选择；
+    CTQW 演化本身是确定性的（只要 H 和 |ψ₀⟩ 给定），保留 seed 是为了
+    与旧版占位接口签名兼容，便于 runner._clone_with_seed 调用。
     """
 
     def __init__(self, t: float = 1.0, lam: float = 0.0,
@@ -165,24 +178,53 @@ class QuantumScorer(Scorer):
         self.t = t
         self.lam = lam
         self.init_method = init_method
-        self._rng = np.random.RandomState(seed)
+        self.seed = seed
 
     def score_all(self, candidates: set[int], S: set[int],
                   instance) -> dict[int, float]:
-        # 占位：在候选节点上生成均匀随机评分
-        # TODO: 替换为真实的 CTQW 概率计算
-        n_candidates = len(candidates)
-        if n_candidates == 0:
+        """对候选节点批量计算 CTQW 概率评分。
+
+        步骤：
+          1. 构造哈密顿量 H = A + λ·Σ|u⟩⟨u|
+          2. 构造初始态 |ψ₀⟩
+          3. 计算演化算子 U(t) = exp(-iHt)（scipy.linalg.expm）
+          4. 演化得到 |ψ(t)⟩ = U(t) · |ψ₀⟩
+          5. 概率 P_v = |ψ_v(t)|²，只返回候选节点的 P_v
+
+        参数:
+            candidates: 候选节点集合（仅在这些节点上返回评分）。
+            S: 当前已选节点集合，影响哈密顿量的种子扰动项。
+            instance: GraphInstance 对象，提供邻接矩阵和节点数。
+
+        返回:
+            {节点索引: 概率} 字典，仅包含候选节点。
+        """
+        if not candidates:
             return {}
-        raw = self._rng.rand(n_candidates)
-        raw_sum = raw.sum()
-        if raw_sum > 0:
-            raw = raw / raw_sum
-        return dict(zip(candidates, raw))
+
+        n = instance.num_nodes
+        adjacency = instance.adjacency
+
+        # 1. 构造哈密顿量（实对称矩阵；λ=0 或 S=∅ 时退化为 A）
+        H = construct_hamiltonian(adjacency, S, self.lam)
+
+        # 2. 构造初始态（复数向量，已归一化 Σ|ψ_i|² = 1）
+        psi0 = build_initial_state(n, S, adjacency, self.init_method)
+
+        # 3-4. CTQW 演化：|ψ(t)⟩ = e^{-iHt} · |ψ₀⟩
+        # 注意 expm 接受任意 numpy 矩阵；-1j 触发复数运算
+        U = expm(-1j * H * self.t)
+        psi_t = U @ psi0
+
+        # 5. 节点概率 P_v = |ψ_v|²（虚部应为 0，取模平方即得实数概率）
+        probs = np.abs(psi_t) ** 2
+
+        # 仅返回候选节点的概率
+        return {v: float(probs[v]) for v in candidates}
 
     def score(self, v: int, S: set[int], instance) -> float:
-        # 占位：返回随机值
-        return float(self._rng.rand())
+        """单节点评分：复用 score_all 以避免重复演化计算。"""
+        return self.score_all({v}, S, instance).get(v, 0.0)
 
     @property
     def name(self) -> str:

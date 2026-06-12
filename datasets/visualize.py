@@ -377,8 +377,7 @@ def _compute_ctqw_probs(data: dict, G: nx.Graph,
                          init_method: str) -> np.ndarray:
     """计算所有节点的 CTQW 概率 P_v(t)。
 
-    当前使用 QuantumScorer（占位实现，返回均匀随机概率）。
-    CTQW 模块完成后，此处自动使用真实矩阵指数计算。
+    通过 QuantumScorer 调用 scipy.linalg.expm 计算真实的矩阵指数演化。
     """
     from src.scoring import QuantumScorer
     from src.graph_utils import GraphInstance

@@ -32,6 +32,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import wilcoxon
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -394,6 +395,29 @@ def analyze_and_plot(df: pd.DataFrame, task_type: str, tag: str = "small"):
     summary_df.to_csv(summary_path, index=False, encoding="utf-8")
     print(f"汇总统计已保存至: {summary_path}")
 
+    # ---- 显著性检验 ----
+    # 基线：MC 用 ClassicalClique（更强的经典对照），DS 用 ClassicalDense
+    baseline = "ClassicalClique" if task_type == "maximum_clique" \
+        else "ClassicalDense"
+    if baseline in base_names:
+        print(f"\n{'=' * 60}")
+        print(f"显著性检验（vs 基线 {baseline}，Wilcoxon signed-rank paired test）")
+        print(f"{'=' * 60}")
+        sig_df = paired_significance_test(df, baseline=baseline)
+        if not sig_df.empty:
+            for _, r in sig_df.iterrows():
+                print(f"\n  {r['algorithm']} vs {baseline}:")
+                print(f"    配对样本数: {r['n_pairs']}")
+                print(f"    均值差异:   {r['mean_diff']:+.4f}")
+                print(f"    中位数差异: {r['median_diff']:+.4f}")
+                if not pd.isna(r['p_value']):
+                    print(f"    p-value:    {r['p_value']:.6f}")
+                print(f"    结论: {r['significance']}")
+
+            sig_path = RESULTS_DIR / f"{task_type}_{tag}_significance.csv"
+            sig_df.to_csv(sig_path, index=False, encoding="utf-8")
+            print(f"\n显著性检验结果已保存至: {sig_path}")
+
 
 def plot_grouped_bars(df: pd.DataFrame, task_type: str, tag: str):
     """按参数组合绘制分组柱状图。聚合到算法基名。"""
@@ -478,6 +502,120 @@ def _base_name(full_name: str) -> str:
         if full_name.startswith(key):
             return key
     return full_name
+
+
+# ============================================================
+# 显著性检验
+# ============================================================
+
+def paired_significance_test(df: pd.DataFrame, baseline: str
+                              ) -> pd.DataFrame:
+    """对每个算法相对 baseline 做 Wilcoxon signed-rank paired test。
+
+    配对策略：按 (sample_id, run_id) 配对。
+      - 同一张图同一 seed 下比较两种算法的 objective
+      - 这样能最大限度消除"图本身难度"和"初始化随机性"两类无关方差
+      - 配对样本量 = 实例数 × 重复次数（small 模式下约 13 组 × 5 实例 × 4 次 = 260 对）
+
+    Wilcoxon signed-rank test 是 paired t-test 的非参数版本，
+    不假设差值服从正态分布，适合贪心算法输出（整数团大小）。
+
+    参数:
+        df: 实验结果 DataFrame，需含 sample_id, run_id, algo_base, objective 列。
+        baseline: 作为对照的算法基名，如 "ClassicalClique"。
+
+    返回:
+        DataFrame，每行一个算法（不含 baseline 自身），
+        列: algorithm, n_pairs, mean_diff, median_diff,
+            wilcoxon_stat, p_value, significance
+    """
+    rows = []
+    base_df = df[df["algo_base"] == baseline]
+
+    if base_df.empty:
+        print(f"警告: 找不到基线算法 {baseline}，跳过显著性检验")
+        return pd.DataFrame()
+
+    # 把基线整理成 (sample_id, run_id) -> objective 的字典
+    base_lookup = {
+        (r["sample_id"], r["run_id"]): r["objective"]
+        for _, r in base_df.iterrows()
+    }
+
+    for algo in sorted(df["algo_base"].unique()):
+        if algo == baseline:
+            continue
+
+        sub = df[df["algo_base"] == algo]
+        # 按 (sample_id, run_id) 配对
+        paired = []
+        for _, r in sub.iterrows():
+            key = (r["sample_id"], r["run_id"])
+            if key in base_lookup:
+                paired.append((r["objective"], base_lookup[key]))
+
+        if len(paired) < 2:
+            rows.append({
+                "algorithm": algo, "baseline": baseline,
+                "n_pairs": len(paired),
+                "mean_diff": float("nan"), "median_diff": float("nan"),
+                "wilcoxon_stat": float("nan"), "p_value": float("nan"),
+                "significance": "n/a",
+            })
+            continue
+
+        algo_vals = np.array([p[0] for p in paired])
+        base_vals = np.array([p[1] for p in paired])
+        diffs = algo_vals - base_vals
+
+        # 全部一样时 wilcoxon 报错，单独处理
+        if np.allclose(diffs, 0):
+            rows.append({
+                "algorithm": algo, "baseline": baseline,
+                "n_pairs": len(paired),
+                "mean_diff": 0.0, "median_diff": 0.0,
+                "wilcoxon_stat": float("nan"),
+                "p_value": 1.0,
+                "significance": "无差异",
+            })
+            continue
+
+        # Wilcoxon signed-rank test（双侧）
+        try:
+            stat, p_val = wilcoxon(algo_vals, base_vals,
+                                    zero_method="wilcox",
+                                    alternative="two-sided")
+        except ValueError as e:
+            stat, p_val = float("nan"), float("nan")
+
+        # 显著性等级标注
+        mean_d = float(np.mean(diffs))
+        if np.isnan(p_val):
+            sig = "n/a"
+        elif p_val < 0.001:
+            sig = ("✓ p<0.001 显著优于" if mean_d > 0
+                   else "✗ p<0.001 显著劣于") + f" {baseline}"
+        elif p_val < 0.01:
+            sig = ("✓ p<0.01 显著优于" if mean_d > 0
+                   else "✗ p<0.01 显著劣于") + f" {baseline}"
+        elif p_val < 0.05:
+            sig = ("✓ p<0.05 显著优于" if mean_d > 0
+                   else "✗ p<0.05 显著劣于") + f" {baseline}"
+        else:
+            sig = f"~ 与 {baseline} 无显著差异 (p={p_val:.3f})"
+
+        rows.append({
+            "algorithm": algo,
+            "baseline": baseline,
+            "n_pairs": len(paired),
+            "mean_diff": mean_d,
+            "median_diff": float(np.median(diffs)),
+            "wilcoxon_stat": float(stat) if not np.isnan(stat) else stat,
+            "p_value": float(p_val) if not np.isnan(p_val) else p_val,
+            "significance": sig,
+        })
+
+    return pd.DataFrame(rows)
 
 
 # ============================================================

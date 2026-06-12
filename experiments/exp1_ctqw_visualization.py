@@ -70,24 +70,23 @@ def compute_ctqw_probabilities(instance: GraphInstance,
                                init_method: str = "max_degree") -> np.ndarray:
     """计算 CTQW 节点概率分布 P_v(t)。
 
-    当前为占位实现。在真实 CTQW 模块完成后，取消注释下方的实际计算代码。
+    通过 QuantumScorer 调用 scipy.linalg.expm 完成 |ψ(t)⟩ = e^{-iHt}|ψ₀⟩
+    的矩阵指数计算，最终返回 P_v = |ψ_v(t)|²。
 
     参数:
         instance: 图实例。
-        S: 种子集合（None 表示空集）。
+        S: 种子集合（None 表示空集，此时按 init_method 选择初态）。
         t: 演化时间。
         lam: 扰动强度。
         init_method: 初始态构造方式。
 
     返回:
-        长度为 n 的数组，P[v] = 节点 v 的概率。
+        长度为 n 的数组，P[v] = 节点 v 的概率，满足 Σ P = 1。
     """
     n = instance.num_nodes
-    adjacency = instance.adjacency
     S = S or set()
 
-    # ---------- 占位实现 ----------
-    # 使用 QuantumScorer 计算（当前返回均匀随机概率）
+    # 通过 QuantumScorer 计算（内部实现真实 CTQW）
     from src.scoring import QuantumScorer
     qs = QuantumScorer(t=t, lam=lam, init_method=init_method, seed=42)
     candidates = set(range(n))
@@ -96,13 +95,6 @@ def compute_ctqw_probabilities(instance: GraphInstance,
     for v, p in scores.items():
         probs[v] = p
     return probs
-
-    # ---------- 真实 CTQW 实现（待启用）----------
-    # from scipy.linalg import expm
-    # H = construct_hamiltonian(adjacency, S, lam)
-    # psi0 = build_initial_state(n, S, adjacency, init_method)
-    # psi_t = expm(-1j * H * t) @ psi0
-    # return np.abs(psi_t) ** 2
 
 
 # ============================================================
@@ -322,7 +314,7 @@ def run_visualization_experiment(instance: GraphInstance,
     print(f"  目标节点平均概率: {np.mean(target_probs):.6f}")
     print(f"  背景节点平均概率: {np.mean(bg_probs):.6f}")
     print(f"  Ratio = {ratio:.4f}")
-    print(f"  Ratio > 1: {'是 ✓' if ratio > 1 else '否 ✗ (占位实现预期结果)'}")
+    print(f"  Ratio > 1: {'是 ✓ (目标区域概率集中)' if ratio > 1 else '否 ✗ (CTQW 未在目标区域形成概率集中)'}")
 
     # 3. 绘制概率分布图
     safe_id = sample_id.replace("/", "_")

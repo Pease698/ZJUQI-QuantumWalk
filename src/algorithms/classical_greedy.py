@@ -53,22 +53,34 @@ class ClassicalGreedy(BaseAlgorithm):
         history: list[dict] = []
         iterations = 0
 
+        # 密集子图任务的目标大小（理论 §7.2）
+        # MC 任务终止于"候选集合为空"（团扩张到极限）；
+        # 但 DS 任务的候选集合定义宽松，需要显式停在 |S|=k 处。
+        # answer_size 即植入子图大小，DS 数据集每个 JSON 都有此字段。
+        target_size = None
+        if instance.task_type == "densest_subgraph":
+            target_size = instance.parameters.get("answer_size")
+
         while True:
             # 1. 构造候选集合
             candidates = self.candidate_builder.build(
                 adjacency, edge_set, S, all_nodes)
 
-            # 2. 终止条件：无候选节点
+            # 2. 终止条件 A：无候选节点（MC 任务的自然停止）
             if not candidates:
                 break
 
-            # 3. 评分
+            # 3. 终止条件 B：DS 任务达到目标团大小
+            if target_size is not None and len(S) >= target_size:
+                break
+
+            # 4. 评分
             scores = self.scorer.score_all(candidates, S, instance)
 
-            # 4. 选择评分最高的节点
+            # 5. 选择评分最高的节点
             best_v = max(candidates, key=lambda v: scores.get(v, float("-inf")))
 
-            # 5. 更新
+            # 6. 更新
             S.add(best_v)
 
             history.append({
