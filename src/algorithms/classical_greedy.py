@@ -40,8 +40,10 @@ class ClassicalGreedy(BaseAlgorithm):
     """
 
     def __init__(self, candidate_builder: CandidateSetBuilder,
-                 scorer: Scorer, name: str = "ClassicalGreedy"):
+                 scorer: Scorer, name: str = "ClassicalGreedy",
+                 start_node: int | None = None):
         super().__init__(candidate_builder, scorer, name)
+        self.start_node = start_node
 
     def solve(self, instance: GraphInstance) -> AlgorithmResult:
         t_start = time.perf_counter()
@@ -50,6 +52,8 @@ class ClassicalGreedy(BaseAlgorithm):
         edge_set = instance.edge_set
         all_nodes = set(range(instance.num_nodes))
         S: set[int] = set()
+        if self.start_node is not None:
+            S.add(self.start_node)
         history: list[dict] = []
         iterations = 0
 
