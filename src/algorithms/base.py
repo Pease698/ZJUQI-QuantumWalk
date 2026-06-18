@@ -33,6 +33,7 @@ class AlgorithmResult:
     # 可选：与 ground truth 的对比信息
     answer_size: int = 0
     recall: float = 0.0
+    timed_out: bool = False             # 是否因超时被终止（exp6 使用）
     params: dict = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict:
@@ -47,6 +48,7 @@ class AlgorithmResult:
             "solution_size": len(self.solution),
             "answer_size": self.answer_size,
             "recall": self.recall,
+            "timed_out": self.timed_out,
             "solution": self.solution,
             **self.params,
         }

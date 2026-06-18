@@ -24,13 +24,13 @@
 import time
 
 import numpy as np
-from scipy.linalg import expm
 
 from .base import BaseAlgorithm, AlgorithmResult
 from .classical_greedy import ClassicalGreedy
 from ..graph_utils import GraphInstance
 from ..candidate_set import CandidateSetBuilder, CliqueCandidateSet
 from ..scoring import ClassicalCliqueScorer
+from ..ctqw_evolution import compute_ctqw_evolution
 
 
 class _MultiStartBase(BaseAlgorithm):
@@ -99,9 +99,15 @@ class MultiStartCTQWGreedy(_MultiStartBase):
     """
 
     def __init__(self, K: int = 5, t: float = 1.0,
+                 evolution_method: str = "auto",
+                 krylov_dim: int | None = None,
+                 cheb_degree: int | None = None,
                  name: str | None = None, seed: int = 0):
         super().__init__(K=K, name=name or f"MultiStartCTQW(K={K})", seed=seed)
         self.t = t
+        self.evolution_method = evolution_method
+        self.krylov_dim = krylov_dim
+        self.cheb_degree = cheb_degree
 
     def _select_seeds(self, instance: GraphInstance, K: int) -> list[int]:
         n = instance.num_nodes
@@ -110,8 +116,14 @@ class MultiStartCTQWGreedy(_MultiStartBase):
         # 全图均匀叠加，避开实验报告 §6.4 揭示的种子集合均匀叠加错配
         psi0 = np.ones(n, dtype=np.complex128) / np.sqrt(n)
         H = adjacency  # S=∅、λ=0 时退化为 A
-        U = expm(-1j * H * self.t)
-        psi_t = U @ psi0
+
+        # CTQW 演化：支持 exact / krylov / chebyshev 三种方法
+        psi_t = compute_ctqw_evolution(
+            H, psi0, self.t,
+            method=self.evolution_method,
+            krylov_dim=self.krylov_dim,
+            cheb_degree=self.cheb_degree,
+        )
         probs = np.abs(psi_t) ** 2
 
         # 概率降序取 Top-K（np.argsort 升序，所以取后 K 个倒过来）

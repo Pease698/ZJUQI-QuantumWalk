@@ -10,17 +10,18 @@
   - Scorer 是统一接口，所有评分函数实现 score() 和 score_all()
   - HybridScorer 是组合器，接受任意两个 Scorer + alpha 权重
   - 归一化在 HybridScorer 内部完成（min-max，仅在候选集合上计算）
-  - QuantumScorer 用 scipy.linalg.expm 计算真实 CTQW 概率演化
+  - QuantumScorer 通过 ctqw_evolution 模块计算 CTQW 演化，
+    支持 exact / krylov / chebyshev 三种方法（默认 auto 自动选择）
 """
 
 from abc import ABC, abstractmethod
 
 import numpy as np
-from scipy.linalg import expm
 
-# 真实 CTQW 计算依赖：哈密顿量构造（§5）和初态构造（§6）
+# 真实 CTQW 计算依赖：哈密顿量构造（§5）、初态构造（§6）、演化计算
 from .hamiltonian import construct_hamiltonian
 from .initial_state import build_initial_state
+from .ctqw_evolution import compute_ctqw_evolution
 
 
 class Scorer(ABC):
@@ -168,17 +169,27 @@ class QuantumScorer(Scorer):
       - t  演化时间
       - λ  种子扰动强度
 
-    注意：seed 参数仅在 S 为空且 init_method='random' 时影响初始态选择；
-    CTQW 演化本身是确定性的（只要 H 和 |ψ₀⟩ 给定），保留 seed 是为了
-    与旧版占位接口签名兼容，便于 runner._clone_with_seed 调用。
+    演化方法（evolution_method）：
+      - "exact" (n≤200 默认) — scipy.linalg.expm 精确计算
+      - "krylov" (n>200 默认) — Lanczos + Krylov 子空间近似
+      - "chebyshev"          — Chebyshev 多项式展开（极低内存）
+      - "auto" (默认)         — 自动选择（n≤200→exact, n>200→krylov）
     """
 
     def __init__(self, t: float = 1.0, lam: float = 0.0,
-                 init_method: str = "max_degree", seed: int = 0):
+                 init_method: str = "max_degree", seed: int = 0,
+                 evolution_method: str = "auto",
+                 krylov_dim: int | None = None,
+                 cheb_degree: int | None = None,
+                 krylov_tol: float = 1e-10):
         self.t = t
         self.lam = lam
         self.init_method = init_method
         self.seed = seed
+        self.evolution_method = evolution_method
+        self.krylov_dim = krylov_dim
+        self.cheb_degree = cheb_degree
+        self.krylov_tol = krylov_tol
 
     def score_all(self, candidates: set[int], S: set[int],
                   instance) -> dict[int, float]:
@@ -187,9 +198,8 @@ class QuantumScorer(Scorer):
         步骤：
           1. 构造哈密顿量 H = A + λ·Σ|u⟩⟨u|
           2. 构造初始态 |ψ₀⟩
-          3. 计算演化算子 U(t) = exp(-iHt)（scipy.linalg.expm）
-          4. 演化得到 |ψ(t)⟩ = U(t) · |ψ₀⟩
-          5. 概率 P_v = |ψ_v(t)|²，只返回候选节点的 P_v
+          3. 调用 compute_ctqw_evolution 完成 |ψ(t)⟩ = e^{-iHt}|ψ₀⟩
+          4. 概率 P_v = |ψ_v(t)|²，只返回候选节点的 P_v
 
         参数:
             candidates: 候选节点集合（仅在这些节点上返回评分）。
@@ -211,12 +221,17 @@ class QuantumScorer(Scorer):
         # 2. 构造初始态（复数向量，已归一化 Σ|ψ_i|² = 1）
         psi0 = build_initial_state(n, S, adjacency, self.init_method)
 
-        # 3-4. CTQW 演化：|ψ(t)⟩ = e^{-iHt} · |ψ₀⟩
-        # 注意 expm 接受任意 numpy 矩阵；-1j 触发复数运算
-        U = expm(-1j * H * self.t)
-        psi_t = U @ psi0
+        # 3. CTQW 演化：|ψ(t)⟩ = e^{-iHt} · |ψ₀⟩
+        #    通过 ctqw_evolution 模块支持 exact / krylov / chebyshev 三种方法
+        psi_t = compute_ctqw_evolution(
+            H, psi0, self.t,
+            method=self.evolution_method,
+            krylov_dim=self.krylov_dim,
+            cheb_degree=self.cheb_degree,
+            krylov_tol=self.krylov_tol,
+        )
 
-        # 5. 节点概率 P_v = |ψ_v|²（虚部应为 0，取模平方即得实数概率）
+        # 4. 节点概率 P_v = |ψ_v|²
         probs = np.abs(psi_t) ** 2
 
         # 仅返回候选节点的概率

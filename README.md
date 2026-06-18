@@ -21,11 +21,14 @@ ZJUQI-QuantumWalk/
 │   ├── scoring.py               #   评分函数 ★ 独立模块（理论 §8）
 │   ├── hamiltonian.py           #   哈密顿量构造（理论 §5）
 │   ├── initial_state.py         #   初始态构造（理论 §6）
+│   ├── ctqw_evolution.py        #   CTQW 演化计算（exact / Krylov / Chebyshev）
+│   ├── timeout.py               #   超时控制（exp6 使用，multiprocessing 隔离）
 │   ├── algorithms/              #   算法实现
 │   │   ├── base.py              #     算法基类 + 结果数据结构
 │   │   ├── classical_greedy.py  #     经典贪心算法
 │   │   ├── simulated_annealing.py #   模拟退火算法
-│   │   └── quantum_greedy.py    #     量子引导贪心 [CTQW 占位]
+│   │   ├── quantum_greedy.py    #     量子引导贪心（嵌入式方案）
+│   │   └── multi_start_ctqw.py  #     Multi-Start CTQW（外部起点选择器）
 │   ├── runner.py                #   实验运行器
 │   ├── metrics.py               #   评价指标
 │   └── README.md                #   src 模块详细文档
@@ -37,16 +40,25 @@ ZJUQI-QuantumWalk/
 │   │   ├── artificial/          #     人工植入数据（答案已知，5实例/组）
 │   │   └── external/            #     外部 DIMACS 数据（答案仅知上界）
 │   ├── generate_all.py          #   一键生成入口
-│   ├── visualize.py             #   可视化脚本
+│   ├── visualize.py             #   可视化脚本（支持 CTQW 概率着色模式）
 │   └── README.md                #   数据集详细文档
 │
-├── experiments/                 # 实验脚本（对应理论 §13 四组实验）
+├── experiments/                 # 实验脚本（理论 §13 + 新增实验五/六）
 │   ├── exp1_ctqw_visualization.py    #   实验一：CTQW 概率分布可视化
 │   ├── exp2_algorithm_comparison.py  #   实验二：与经典贪心算法对比（支持外部数据）
 │   ├── exp3_ablation.py              #   实验三：消融实验
 │   ├── exp4_sensitivity.py           #   实验四：参数敏感性分析
+│   ├── exp5_multi_start.py           #   实验五：Multi-Start CTQW 种子选择（H4 验证）
+│   ├── exp6_pre_tune.py              #   实验六前置：Krylov m / Chebyshev d 参数调优
+│   ├── exp6_large_scale_approx.py    #   实验六：大规模图 CTQW 近似方法对比
+│   ├── tune_quantum_params.py        #   量子参数调优（init × α 扫描）
+│   ├── d2_mc_breakdown.py            #   细分指标分析（按 n/p/k 分组深挖）
 │   └── run_experiment.py             #   通用实验运行器（自由组合）
 ├── results/                     # 实验结果输出（CSV + 图表）
+├── report/                      # 实验报告与演示材料
+│   ├── 实验报告.md               #   正式实验报告
+│   ├── 汇报讲稿.md               #   汇报讲稿
+│   └── ppt/                     #   Beamer 幻灯片
 ├── image/                       # 理论文档插图
 ├── 量子信息理论部分.md           # 理论文档
 ├── 量子信息理论部分.pdf          # 理论文档（PDF）
@@ -75,21 +87,28 @@ python -m converters.convert_dimacs
 
 ## 实验脚本
 
-五个实验脚本位于 `experiments/` 目录下，对应理论文档 §13 的实验设计和灵活的探索性实验：
+实验脚本位于 `experiments/` 目录下，包含理论文档 §13 的四组固定实验、新发现的 Multi-Start 方案（实验五），以及大规模图近似方法对比（实验六）：
 
-| 脚本 | 理论依据 | 目的 | 适用数据 | CTQW 依赖 |
+| 脚本 | 理论依据 | 目的 | 适用数据 | CTQW 方法 |
 |------|---------|------|---------|-----------|
-| `exp1_ctqw_visualization.py` | §13.2 | CTQW 概率分布可视化 | 仅人工 | 占位 |
-| `exp2_algorithm_comparison.py` | §13.3 | 算法对比 ★ 核心实验 | **人工 + 外部** | 占位 |
-| `exp3_ablation.py` | §13.4 | 消融实验 | 仅人工 | 占位 |
-| `exp4_sensitivity.py` | §13.5 | 参数敏感性分析 | 仅人工 | 占位 |
-| `run_experiment.py` | 通用 | 自由组合数据/算法/参数 | **人工 + 外部** | 占位 |
+| `exp1_ctqw_visualization.py` | §13.2 | CTQW 概率分布可视化 | 仅人工 | exact |
+| `exp2_algorithm_comparison.py` | §13.3 | 算法对比 ★ 核心实验 | **人工 + 外部** | auto（自动选择） |
+| `exp3_ablation.py` | §13.4 | 消融实验 | 仅人工 | auto |
+| `exp4_sensitivity.py` | §13.5 | 参数敏感性分析 | 仅人工 | auto |
+| `exp5_multi_start.py` | 新增 H4 | Multi-Start CTQW 种子选择 | 仅人工 | auto |
+| `exp6_pre_tune.py` | 新增 | Krylov m / Chebyshev d 参数调优 | n=200+500 单图 | exact + krylov + chebyshev |
+| `exp6_large_scale_approx.py` | 新增 | 大规模图近似方法对比 | **人工(n≥100) + DIMACS** | exact / krylov / chebyshev |
+| `tune_quantum_params.py` | — | init × α 参数扫描调优 | 仅人工 | auto |
+| `d2_mc_breakdown.py` | — | 按 n/p/k 分组细分分析 | 读取 CSV | 无 |
+| `run_experiment.py` | 通用 | 自由组合数据/算法/参数 | **人工 + 外部** | auto |
 
 实验脚本的重复策略：
-- **人工数据**：每组 5 个实例 × 每实例 4 次 = 20 数据点（符合 §13.1 "每组至少 20 次重复"）
-- **外部数据**：每数据集 1 个实例 × 每实例 10 次 = 10 数据点（无跨图方差，需更多运行内统计）
+- **人工数据（小规模）**：每组 5 个实例 × 每实例 4 次 = 20 数据点（符合 §13.1）
+- **人工数据（大规模 exp6）**：每组 5 个实例 × 每实例 2 次 = 10 数据点（控制总耗时）
+- **外部数据（小规模）**：每数据集 1 个实例 × 每实例 10 次 = 10 数据点
+- **外部数据（大规模 exp6）**：每数据集 1 个实例 × 每实例 3 次 = 3 数据点
 
-> **关于实验图表**：`experiments/` 目录下四个专有实验脚本（exp1~exp4）中的图表生成逻辑为初步版本，
+> **关于实验图表**：`experiments/` 目录下各实验脚本中的图表生成逻辑为初步版本，
 > 仅用于快速验证算法行为和获取初步数值结果。后续可根据论文需求调整图表样式、颜色方案、
 > 标注方式等。所有绘图逻辑集中在各脚本的 `analyze_and_plot` / `plot_*` 函数中，
 > 修改时无需改动算法运行逻辑。`run_experiment.py` 的绘图逻辑同样可独立修改。
@@ -201,6 +220,166 @@ python3 experiments/exp3_ablation.py --task maximum_clique --small
 python3 experiments/exp4_sensitivity.py --task maximum_clique
 ```
 
+### 实验五：Multi-Start CTQW 种子选择（新增 H4 验证）
+
+基于实验二的机理诊断——嵌入式 CTQW 在贪心内部与经典 R 评分方向重合但精度更低——将 CTQW 外置于贪心算法之前，用全图均匀叠加初态做起点选择器。
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--smoke` | 单实例烟雾测试 | — |
+| `--small` | n≤50 全跑 + K 扫描 | — |
+| `--medium --K <N>` | n=60~200 跑指定 K | — |
+| `--csv` | 直接分析已有 CSV | — |
+
+K 扫描范围：{1, 3, 5, 10}
+
+对照算法（4 个，逐一剥离贡献源）：
+1. ClassicalClique — 强经典基线
+2. MultiStartRandom(K) — 随机起点；剥离"多起点本身就涨"
+3. MultiStartDegree(K) — 度数 Top-K 起点；剥离"任何全局信号都行"
+4. MultiStartCTQW(K) — 本方案
+
+诊断规则：
+- CTQW > Random → CTQW 起点选择有效
+- CTQW > Degree → CTQW 提供了度数之外的额外信息（H4 强成立）
+
+产出：K 扫描汇总 CSV、Wilcoxon 配对检验表
+
+```bash
+python3 experiments/exp5_multi_start.py --smoke             # 秒级烟雾测试
+python3 experiments/exp5_multi_start.py --small             # K 全扫描 ~6s
+python3 experiments/exp5_multi_start.py --medium --K 10     # medium 最优 K ~89s
+```
+
+### 实验六前置：Krylov m / Chebyshev d 参数调优
+
+在正式大规模实验之前，对比不同参数值的精度与效率，确定推荐值。
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--smoke` | 烟雾测试：3 个参数值 + 1 次重复 | — |
+| `--timeout` | 单次计算超时门限（秒） | 120 |
+
+扫描范围：
+- Krylov: m ∈ {20, 30, 40, 50, 60, 80, 100, 150}
+- Chebyshev: d ∈ {20, 30, 40, 50, 60, 80, 100, 150}
+
+测试图：n=200（精确 expm 对照）+ n=500（时间 scaling）
+
+产出：
+- 收敛曲线三子图（L2 误差、运行时间、Top-10 一致性）
+- 推荐参数文本 `recommended_params.txt`
+- 完整扫描 CSV
+
+**评价指标说明**：
+
+| 指标 | 公式 | 含义 | 判断标准 |
+|------|------|------|---------|
+| $\epsilon_2$ (L2 误差) | $\|P_{\text{approx}} - P_{\text{exact}}\|_2 = \sqrt{\sum_v (P_v^{\text{approx}} - P_v^{\text{exact}})^2}$ | 近似概率向量与精确结果的**整体欧氏距离**。对全部 $n$ 个节点的误差做平方和再开方，反映概率分布的全局偏离程度 | $\epsilon_2 < 10^{-6}$ 视为收敛 |
+| $\epsilon_\infty$ (L∞ 误差) | $\max_v \|P_v^{\text{approx}} - P_v^{\text{exact}}\|$ | 近似概率向量与精确结果在**单个节点上的最大偏差**。最坏情况下的逐节点概率误差，用于检查是否存在局部异常偏离 | $\epsilon_\infty < 10^{-6}$ 视为收敛 |
+| Top-10 一致性 | $\frac{\|\text{Top10}_{\text{approx}} \cap \text{Top10}_{\text{exact}}\|}{10}$ | 按概率降序排列的**前 10 个节点中，近似与精确结果重叠的比例**。1.0 表示完全一致，0.3 表示仅 3 个节点重合。直接衡量近似是否改变了概率排名的头部结构 | =1 为完美匹配 |
+| 运行时间 (rt) | 秒 | n=200 上单次 CTQW 演化的 wall time，用于比较不同参数的成本；n=500 上仅测时间 scaling，不与精确 expm 对比（n=500 时 expm 已不可行） | — |
+
+**四个指标之间的关系**：
+
+- $\epsilon_2$ 和 $\epsilon_\infty$ 通常高度相关，但 $\epsilon_2$ 更能容忍"大量节点有微小误差"的场景（求平方和均值后影响分散），$\epsilon_\infty$ 会暴露个别节点的异常偏离
+- Top-10 一致性是最实用的指标——Multi-Start CTQW 的核心操作是**对概率做 Top-K 选择**，Top-10 能否正确匹配直接决定起点选择是否正确
+- 运行时间随 $m$ / $d$ 近似线性增长，最佳参数是**精度刚好收敛（$\epsilon_2 < 10^{-6}$ 且 Top-10=1.0）时的最小 $m$ / $d$**
+
+**推荐参数选择逻辑**：在满足 $\epsilon_2^{\max} < 10^{-6}$ 的参数值中取最小值，这样既保证精度又最小化计算开销。
+
+```bash
+python3 experiments/exp6_pre_tune.py --smoke           # 10s 烟雾测试
+python3 experiments/exp6_pre_tune.py                   # 完整扫描（约 5 分钟）
+python3 experiments/exp6_pre_tune.py --timeout 120     # 自定义超时
+```
+
+### 实验六：大规模图 CTQW 近似方法对比
+
+分两部分独立运行，使用 `--timeout` 控制单次运行上限。
+
+数据范围（写死在脚本常量中）：
+- **人工数据**：仅 n ∈ {300, 500}（10 个参数组，50 个实例）
+- **DIMACS 外部数据**：5 个指定数据集（gen200, C250-9, p-hat300-3, C1000-9, C2000-9）
+
+演化方法（仅两种近似）：
+- `krylov_m30`：Krylov 子空间 m=30
+- `cheb_d50`：Chebyshev 多项式 d=50
+
+**Part A — 嵌入式方案**（`--mode embedded`）：
+
+| 算法 | 演化方法 | 数量 |
+|------|---------|------|
+| ClassicalDegree | — | 1 |
+| ClassicalClique | — | 1（强基线） |
+| SimulatedAnnealing | — | 1 |
+| QuantumGuidedGreedy × krylov_m30 | Krylov m=30 | 1 |
+| QuantumGuidedGreedy × cheb_d50 | Chebyshev d=50 | 1 |
+| **每实例合计** | | **5 算法** |
+
+**Part B — 外置式方案**（`--mode external`，K ∈ {5,10,20,30}）：
+
+| 算法 | K 值 | 演化方法 | 数量 |
+|------|------|---------|------|
+| ClassicalClique | — | — | 1 |
+| MS_Random × K | 5,10,20,30 | — | 4 |
+| MS_Degree × K | 5,10,20,30 | — | 4 |
+| MS_CTQW × K × krylov_m30 | 5,10,20,30 | Krylov m=30 | 4 |
+| MS_CTQW × K × cheb_d50 | 5,10,20,30 | Chebyshev d=50 | 4 |
+| **每实例合计** | | | **17 算法** |
+
+**运行次数**：人工数据每实例 2 次，DIMACS 每实例 3 次。
+
+**运行总量**：
+
+| 场景 | 实例 | 算法/实例 | 重复 | 总运行 |
+|---|---|---|---|---|
+| Part A artificial | 50 | 5 | 2 | **500** |
+| Part A dimacs | 5 | 5 | 3 | **75** |
+| Part B artificial | 50 | 17 | 2 | **1,700** |
+| Part B dimacs | 5 | 17 | 3 | **255** |
+| **合计** | | | | **2,530** |
+
+```bash
+# 烟雾测试（秒级）
+python3 experiments/exp6_large_scale_approx.py --mode embedded --smoke
+python3 experiments/exp6_large_scale_approx.py --mode external --smoke
+
+# Part A — 嵌入式方案（人工数据 n=300,500）
+python3 experiments/exp6_large_scale_approx.py --mode embedded
+
+# Part A — 嵌入式方案（DIMACS 外部验证）
+python3 experiments/exp6_large_scale_approx.py --mode embedded --data-source dimacs
+
+# Part B — 外置方案（人工数据）
+python3 experiments/exp6_large_scale_approx.py --mode external
+
+# Part B — 外置方案（DIMACS，可减少 K 以提速）
+python3 experiments/exp6_large_scale_approx.py \
+    --mode external --data-source dimacs --K-values 10 20
+
+# 自定义超时和重复次数
+python3 experiments/exp6_large_scale_approx.py \
+    --mode embedded --timeout 600 --repeat 3
+```
+
+### 量子参数调优脚本
+
+扫描 `init_method × α` 组合（固定 t=1.0, λ=0.5），用于实验二的参数调优前置。
+
+```bash
+python3 experiments/tune_quantum_params.py --task maximum_clique
+python3 experiments/tune_quantum_params.py --task maximum_clique --quick  # 仅 α∈{0,0.5,1.0}
+```
+
+### 细分指标分析脚本
+
+读取已有实验 CSV，按 (n, p, k) 分组深挖：子组均值对比、胜率配对、recall/成功率、背景密度分组。
+
+```bash
+python3 experiments/d2_mc_breakdown.py
+```
+
 ### 通用实验运行器
 
 自由组合数据源、算法、评分方法和参数，用于探索性分析和外部数据测试。
@@ -265,9 +444,13 @@ python3 experiments/run_experiment.py \
 
 ```python
 from src import (
-    ClassicalGreedy, SimulatedAnnealing,
-    CliqueCandidateSet, ClassicalCliqueScorer,
+    ClassicalGreedy, SimulatedAnnealing, QuantumGuidedGreedy,
+    CliqueCandidateSet, DenseCandidateSet,
+    ClassicalCliqueScorer, ClassicalDenseScorer, ClassicalDegreeScorer,
     load_instance, run_single_instance, ExperimentConfig,
+)
+from src.algorithms.multi_start_ctqw import (
+    MultiStartCTQWGreedy, MultiStartRandomGreedy, MultiStartDegreeGreedy,
 )
 
 # 加载测试实例
@@ -276,32 +459,58 @@ instance = load_instance(
     "mc_n100_p02_k10/mc_n100_p02_k10_000.json"
 )
 
-# 定义算法
+# 定义算法集合 —— 支持多种 CTQW 演化方法
 algorithms = {
+    "DegreeGreedy": ClassicalGreedy(
+        CliqueCandidateSet(), ClassicalDegreeScorer()),
     "CliqueGreedy": ClassicalGreedy(
         CliqueCandidateSet(), ClassicalCliqueScorer()),
+    "SimulatedAnnealing": SimulatedAnnealing(
+        CliqueCandidateSet(), max_iterations=2000),
+    # 量子引导贪心 —— 自动选择演化方法（n≤200 用 exact，否则用 krylov）
+    "QuantumGreedy": QuantumGuidedGreedy(
+        CliqueCandidateSet(), t=1.0, lam=0.5, alpha=0.5),
+    # 指定 Krylov 子空间维数 m=60
+    "QuantumGreedy_Krylov60": QuantumGuidedGreedy(
+        CliqueCandidateSet(), t=1.0, lam=0.5, alpha=0.5,
+        evolution_method="krylov", krylov_dim=60),
+    # Multi-Start CTQW 外置起点选择
+    "MultiStartCTQW": MultiStartCTQWGreedy(K=5, t=1.0),
+    # 大图场景：Multi-Start + Krylov 近似
+    "MultiStartCTQW_Krylov": MultiStartCTQWGreedy(
+        K=10, t=1.0, evolution_method="krylov", krylov_dim=60),
 }
 
 # 运行实验
 config = ExperimentConfig(n=100, p=0.2, k=10, repeat_runs=4)
 results = run_single_instance(instance, algorithms, config)
+for row in results:
+    print(f"{row['algorithm']}: obj={row['objective']}, "
+          f"time={row['runtime']:.3f}s")
 ```
 
 ## 待完成工作
 
-> **CTQW 演化计算模块**（`scipy.linalg.expm` 实现 `e^{-iHt}`）是当前唯一的阻塞项。
-> 该模块完成后，以下所有任务均可立即生效，**无需修改任何其他代码**。
+CTQW 矩阵指数计算（P0）和 Krylov/Chebyshev 大规模近似方法已完成。以下为后续可探索方向：
 
-| 优先级 | 任务 | 阻塞项 | 涉及文件 |
-|--------|------|--------|---------|
-| **P0** | 实现 CTQW 矩阵指数计算 | — | `src/scoring.py` (`QuantumScorer.score_all`) |
-| P1 | 补全实验一：真实 CTQW 概率分布可视化 | P0 | `experiments/exp1_ctqw_visualization.py` |
-| P1 | 补全实验三：真实消融实验结果 | P0 | `experiments/exp3_ablation.py` |
-| P1 | 补全实验四：真实参数敏感性热力图 | P0 | `experiments/exp4_sensitivity.py` |
-| P2 | 大规模图的 Krylov 子空间近似方法 | P0 | `src/hamiltonian.py` |
-| P2 | 外部数据消融实验（验证泛化能力） | P0 | 在 `experiments/run_experiment.py` 上手动组合 |
-| P3 | 实验图表美化（论文出版级质量） | — | 各 `experiments/*.py` 的 `analyze_and_plot` / `plot_*` 函数 |
-| P3 | 密集子图任务的外部数据收集与转换 | — | `datasets/data/external/densest_subgraph_raw/` |
+### 短期优化（改动局部，风险低）
+
+| 任务 | 涉及文件 | 说明 |
+|------|---------|------|
+| 去均匀基线的 Q 评分 | `src/scoring.py` | `P_v(t) → P_v(t) − 1/n`，提升概率对比度 |
+| Q 作为二级排序（打破 R 平局） | `src/algorithms/quantum_greedy.py` | 先按 R 排，R 相同时用 Q 决胜 |
+| 多时间平均 Q 评分 | `src/scoring.py` | 多 t 值概率求平均，抹平单 t 相位抖动 |
+| 解耦初态（每轮全图均匀叠加 + λ 传 S 信息） | `src/algorithms/quantum_greedy.py` | 将实验一有效的全局初态搬进嵌入式贪心 |
+
+### 中长期探索（涉及新实验或对外部数据的扩展）
+
+| 任务 | 涉及文件 | 说明 |
+|------|---------|------|
+| 运行 exp6 前置实验 + 大规模对比 | `experiments/exp6_*.py` | 确定最优 Krylov/Chebyshev 参数并验证大图性能 |
+| DIMACS 真实图族 CTQW vs Degree 解耦实验 | `experiments/exp5_multi_start.py` | 在团节点不一定高度数的图族上验证 CTQW 独立信息 |
+| 密集子图任务外部数据收集与转换 | `datasets/converters/` | — |
+| 实验图表美化（论文出版级质量） | 各 `experiments/*.py` 绘图函数 | — |
+| DS 任务完整实验（small/medium 全规模） | `experiments/exp2~exp4` | 目前主要聚焦 MC 任务 |
 
 ## 开发状态
 
@@ -309,16 +518,39 @@ results = run_single_instance(instance, algorithms, config)
 |------|------|
 | 数据集生成 | 已完成 |
 | 对照实验框架 | 已完成 |
-| 经典贪心算法 | 已完成 |
+| 经典贪心算法 | 已完成（支持 start_node 种子注入） |
 | 模拟退火算法 | 已完成 |
-| 量子引导贪心算法框架 | 框架就绪，CTQW 计算模块占位 |
-| CTQW 演化计算 | **待实现（P0 阻塞项）** |
-| 实验一: CTQW 可视化 | 框架就绪，CTQW 占位 |
-| 实验二: 算法对比 | 已完成（人工+外部数据） |
-| 实验三: 消融实验 | 框架就绪，CTQW 占位 |
-| 实验四: 参数敏感性 | 框架就绪，CTQW 占位 |
-| 通用实验运行器 | 已完成（人工+外部数据） |
+| 量子引导贪心算法（嵌入式） | 已完成（基于 scipy.linalg.expm） |
+| Multi-Start CTQW（外置起点选择器） | 已完成 |
+| CTQW 演化方法：exact / Krylov / Chebyshev | 已完成（`src/ctqw_evolution.py`） |
+| 算法运行超时控制 | 已完成（`src/timeout.py`，exp6 使用） |
+| CTQW 冒烟测试 | 已完成（6/6 项数值检查通过） |
+| 实验一：CTQW 可视化 | 已完成（Ratio=7.08） |
+| 实验二：算法对比 | 已完成（人工 + 外部数据） |
+| 实验三：消融实验 | 已完成 |
+| 实验四：参数敏感性 | 已完成 |
+| 实验五：Multi-Start | 已完成（首次 p<0.001 显著超越强基线） |
+| 实验六前置：参数调优 | 脚本就绪，待运行 |
+| 实验六：大规模近似对比 | 脚本就绪，待运行 |
+| 通用实验运行器 | 已完成（人工 + 外部数据） |
 | `datasets/visualize.py` | 已完成（基础模式 + CTQW 概率着色） |
+
+## 核心发现
+
+本项目累计运行约 **18,300 次**算法实验（≈40 分钟计算），围绕三组实验得出以下结论：
+
+| 实验 | 验证内容 | 结论 | 关键证据 |
+|---|---|---|---|
+| **实验一** | CTQW 能否识别图的全局团结构？ | **✓ 成立** | 团节点平均概率 / 背景 = 7.08 |
+| **实验二** | 嵌入式 CTQW 评分是否更稳健？ | **⚠ 部分成立** | 混合 > 纯量子 (+43%)，但混合 < 纯经典 (−6.8%) |
+| **实验三** | 外置 CTQW 起点选择器能否超越强基线？ | **✓ 成立** | small Δ=+0.12, medium Δ=+0.71，均 p<0.001 |
+
+**最关键发现**：CTQW 的有效性高度依赖于使用方式。
+
+- **外置于贪心之前**（全图均匀叠加初态）→ 统计显著超越 ClassicalClique 强基线（实验三）
+- **嵌入于贪心内部**（种子集合均匀叠加初态）→ 与经典 R 评分方向重合且精度更低（实验二）
+
+两种用法对应 CTQW 的两种物理模式：**全局拓扑识别** vs **局部种子扩散**。原始理论文档 §6 的嵌入式设计未区分这一差异，实验三的外置方案是项目发现的最有效用法。
 
 ## 依赖
 
@@ -331,4 +563,6 @@ results = run_single_instance(instance, algorithms, config)
 
 ## 参考文献
 
-参见 [量子信息理论部分.md](量子信息理论部分.md) 第 13 节的完整文献列表。
+理论背景与算法设计参见 [量子信息理论部分.md](量子信息理论部分.md) 第 13 节。
+
+实验过程与结果分析参见 [report/实验报告.md](report/实验报告.md)。

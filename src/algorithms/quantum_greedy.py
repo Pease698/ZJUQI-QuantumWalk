@@ -13,13 +13,12 @@ Algorithm: Quantum-guided Greedy Algorithm
   8. 选择评分最高节点加入 S
   9. 重复直到停止条件满足
 
-CTQW 计算通过 scipy.linalg.expm 实现矩阵指数运算。
+CTQW 计算通过 ctqw_evolution 模块实现，支持 exact / krylov / chebyshev 三种方法。
 """
 
 import time
 
 import numpy as np
-from scipy.linalg import expm
 
 from .base import BaseAlgorithm, AlgorithmResult
 from ..graph_utils import GraphInstance
@@ -27,6 +26,7 @@ from ..candidate_set import CandidateSetBuilder
 from ..scoring import ClassicalCliqueScorer, ClassicalDenseScorer
 from ..hamiltonian import construct_hamiltonian
 from ..initial_state import build_initial_state
+from ..ctqw_evolution import compute_ctqw_evolution
 
 
 class QuantumGuidedGreedy(BaseAlgorithm):
@@ -42,6 +42,9 @@ class QuantumGuidedGreedy(BaseAlgorithm):
                  init_method: str = "max_degree",
                  alpha: float = 0.5,
                  seed: int = 0,
+                 evolution_method: str = "auto",
+                 krylov_dim: int | None = None,
+                 cheb_degree: int | None = None,
                  name: str = "QuantumGuidedGreedy"):
         """
         参数:
@@ -51,6 +54,9 @@ class QuantumGuidedGreedy(BaseAlgorithm):
             init_method: 初态初始化方式（uniform / max_degree / random）。
             alpha: 混合评分权重，α=0 纯经典，α=1 纯量子。
             seed: 随机种子（仅 init_method='random' 时影响初态选择）。
+            evolution_method: CTQW 演化方法（auto / exact / krylov / chebyshev）。
+            krylov_dim: Krylov 子空间维数（None 时自动选择）。
+            cheb_degree: Chebyshev 多项式阶数（None 时自动估计）。
         """
         super().__init__(candidate_builder, scorer=None, name=name)
         self.t = t
@@ -58,6 +64,9 @@ class QuantumGuidedGreedy(BaseAlgorithm):
         self.init_method = init_method
         self.alpha = alpha
         self.seed = seed
+        self.evolution_method = evolution_method
+        self.krylov_dim = krylov_dim
+        self.cheb_degree = cheb_degree
 
     def solve(self, instance: GraphInstance) -> AlgorithmResult:
         t_start = time.perf_counter()
@@ -179,13 +188,15 @@ class QuantumGuidedGreedy(BaseAlgorithm):
         # 2. 构造初始态 |ψ₀⟩（理论 §6）
         psi0 = build_initial_state(n, S, adjacency, self.init_method)
 
-        # 3. 演化算子 U(t) = exp(-iHt)，幺正矩阵
-        U = expm(-1j * H * self.t)
+        # 3. CTQW 演化：|ψ(t)⟩ = e^{-iHt}|ψ₀⟩
+        psi_t = compute_ctqw_evolution(
+            H, psi0, self.t,
+            method=self.evolution_method,
+            krylov_dim=self.krylov_dim,
+            cheb_degree=self.cheb_degree,
+        )
 
-        # 4. 演化态 |ψ(t)⟩ = U|ψ₀⟩
-        psi_t = U @ psi0
-
-        # 5. 节点概率 P_v(t) = |ψ_v(t)|²（满足 Σ P_v = 1）
+        # 4. 节点概率 P_v(t) = |ψ_v(t)|²（满足 Σ P_v = 1）
         return np.abs(psi_t) ** 2
 
 
