@@ -98,15 +98,15 @@ DIMACS_WHITELIST = {
 
 # 颜色
 COLORS = {
-    "ClassicalDegree":      "#1f77b4",
-    "ClassicalClique":      "#ff7f0e",
-    "SimulatedAnnealing":   "#2ca02c",
-    "QuantumGreedy_exact":  "#d62728",
-    "QuantumGreedy_krylov": "#9467bd",
-    "QuantumGreedy_cheb":   "#8c564b",
-    "MS_Random":            "#7f7f7f",
-    "MS_Degree":            "#bcbd22",
-    "MS_CTQW":              "#17becf",
+    "ClassicalDegree":          "#1f77b4",
+    "ClassicalClique":          "#ff7f0e",
+    "SimulatedAnnealing":       "#2ca02c",
+    "QuantumGreedy_krylov_m30": "#9467bd",
+    "QuantumGreedy_cheb_d50":   "#8c564b",
+    "MS_Random":                "#7f7f7f",
+    "MS_Degree":                "#bcbd22",
+    "MS_CTQW_krylov_m30":       "#17becf",
+    "MS_CTQW_cheb_d50":         "#e377c2",
 }
 
 
@@ -418,6 +418,30 @@ def _extract_K(algo_name: str) -> int:
 # 分析
 # ============================================================
 
+def _display_name(row: pd.Series) -> str:
+    """构造区分方法的显示名。
+
+    量子变体按演化方法区分（krylov_m30 / cheb_d50 各自独立显示），
+    经典基线保持不变。
+    """
+    fam = row["family"]
+    tag = row.get("method_tag", "N/A")
+    if tag and tag != "N/A":
+        # 简短标签：QG_krylov_m30, MS_CTQW_cheb_d50 等
+        return f"{fam}_{tag}"
+    return fam
+
+
+def _short_label(display: str) -> str:
+    """压缩显示名以便在图表中使用。"""
+    return display \
+        .replace("QuantumGreedy", "QG") \
+        .replace("ClassicalDegree", "DegGreedy") \
+        .replace("ClassicalClique", "CliqueGreedy") \
+        .replace("SimulatedAnnealing", "SimAnneal") \
+        .replace("MS_", "")
+
+
 def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
     """分析实验结果并生成图表和 CSV。"""
     if df.empty:
@@ -427,21 +451,27 @@ def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
     out = RESULTS_DIR / f"exp6_{mode}_{tag}"
     out.mkdir(parents=True, exist_ok=True)
 
-    # 过滤有效结果
-    df_valid = df[df.get("timed_out", pd.Series(False, index=df.index)) == False]
+    # 过滤有效结果，并添加 display_name 列
+    df_valid = df[df.get("timed_out", pd.Series(False, index=df.index)) == False].copy()
+    df_valid["display_name"] = df_valid.apply(_display_name, axis=1)
 
-    # ---- 汇总表 ----
+    # ---- 汇总表（按 display_name 区分方法） ----
     print(f"\n{'=' * 60}")
     print(f"实验结果汇总 ({mode}, {tag})")
     print(f"{'=' * 60}")
 
-    for fam in sorted(df_valid["family"].unique()):
-        sub = df_valid[df_valid["family"] == fam]
+    # 量子方法按 method_tag 分开，经典方法按 family 聚合
+    display_names = sorted(df_valid["display_name"].unique(),
+                           key=lambda d: df_valid[df_valid["display_name"] == d]["objective"].mean(),
+                           reverse=True)
+
+    for dname in display_names:
+        sub = df_valid[df_valid["display_name"] == dname]
         obj_mean, obj_std = mean_std(sub["objective"].tolist())
         rt_mean, rt_std = mean_std(sub["wall_time"].tolist())
-        n_to = int(df[df["family"] == fam]["timed_out"].sum()) \
+        n_to = int(df[df["display_name"] == dname]["timed_out"].sum()) \
             if "timed_out" in df.columns else 0
-        print(f"\n  {fam}:")
+        print(f"\n  {dname}:")
         print(f"    团大小:   {obj_mean:.4f} ± {obj_std:.4f}")
         print(f"    耗时:     {rt_mean:.4f}s ± {rt_std:.4f}")
         print(f"    样本数:   {len(sub)}" + (f" (超时 {n_to})" if n_to else ""))
@@ -460,23 +490,24 @@ def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
 
 
 def _plot_embedded_boxplots(df: pd.DataFrame, out: Path):
-    """Part A 箱线图。"""
-    families = sorted(df["family"].unique(),
-                      key=lambda f: df[df["family"] == f]["objective"].mean(),
-                      reverse=True)
+    """Part A 箱线图：每个 display_name 独立一箱。"""
+    display_names = sorted(df["display_name"].unique(),
+                           key=lambda d: df[df["display_name"] == d]["objective"].mean(),
+                           reverse=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
     for ax_idx, (col, ylabel) in enumerate([("objective", "Clique Size |S|"),
                                              ("wall_time", "Runtime (s)")]):
         ax = axes[ax_idx]
-        data_list = [df[df["family"] == f][col].dropna().tolist() for f in families]
-        short_names = [_short_name(f) for f in families]
+        data_list = [df[df["display_name"] == d][col].dropna().tolist()
+                     for d in display_names]
+        short_names = [_short_label(d) for d in display_names]
 
         bp = ax.boxplot(data_list, tick_labels=short_names,
                         patch_artist=True, widths=0.5)
-        for patch, fam in zip(bp["boxes"], families):
-            color = COLORS.get(fam, "#999999")
+        for patch, dname in zip(bp["boxes"], display_names):
+            color = COLORS.get(dname, "#999999")
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         ax.set_ylabel(ylabel)
@@ -493,7 +524,7 @@ def _plot_embedded_boxplots(df: pd.DataFrame, out: Path):
 
 
 def _plot_external_boxplots(df: pd.DataFrame, out: Path):
-    """Part B 箱线图：按 K 分组的 MS_CTQW vs MS_Degree vs MS_Random。"""
+    """Part B 箱线图：按 K 分组，MS_CTQW 的两种方法各自独立显示。"""
     Ks = sorted([k for k in df["K"].unique() if k > 0])
 
     fig, axes = plt.subplots(1, len(Ks), figsize=(5 * len(Ks), 5),
@@ -502,16 +533,37 @@ def _plot_external_boxplots(df: pd.DataFrame, out: Path):
         ax = axes[0, ki]
         sub = df[df["K"] == K_val]
 
-        groups = ["MS_Random", "MS_Degree", "MS_CTQW"]
+        # MS_Random, MS_Degree（不涉 CTQW，按 family 聚合），
+        # MS_CTQW 按 display_name 拆分
+        groups = []
+        # 先加 MS_Random 和 MS_Degree（经典，不区分方法）
+        if not sub[sub["family"] == "MS_Random"].empty:
+            groups.append(("MS_Random", "Random"))
+        if not sub[sub["family"] == "MS_Degree"].empty:
+            groups.append(("MS_Degree", "Degree"))
+
+        # MS_CTQW 按 display_name 拆分
+        ms_ctqw_names = sorted([
+            d for d in sub["display_name"].unique()
+            if d.startswith("MS_CTQW")
+        ])
+        for dname in ms_ctqw_names:
+            # 从 display_name 提取简短标签
+            label = dname.replace("MS_CTQW_", "CTQW_")
+            groups.append((dname, label))
+
         data_list = []
         labels = []
         colors_list = []
-        for g in groups:
-            gsub = sub[sub["family"] == g]
+        for key, label in groups:
+            if key in ("MS_Random", "MS_Degree"):
+                gsub = sub[sub["family"] == key]
+            else:
+                gsub = sub[sub["display_name"] == key]
             if not gsub.empty:
                 data_list.append(gsub["objective"].dropna().tolist())
-                labels.append(g.replace("MS_", ""))
-                colors_list.append(COLORS.get(g, "#999999"))
+                labels.append(label)
+                colors_list.append(COLORS.get(key, "#999999"))
 
         if data_list:
             bp = ax.boxplot(data_list, tick_labels=labels,
@@ -525,7 +577,7 @@ def _plot_external_boxplots(df: pd.DataFrame, out: Path):
         if not cc.empty:
             cc_mean = cc["objective"].mean()
             ax.axhline(cc_mean, color="red", linestyle="--", linewidth=1,
-                       label=f"ClassicalClique ({cc_mean:.1f})")
+                       label=f"CliqueGreedy ({cc_mean:.1f})")
             ax.legend(fontsize=7)
 
         ax.set_title(f"K = {K_val}")
@@ -541,19 +593,26 @@ def _plot_external_boxplots(df: pd.DataFrame, out: Path):
 
 
 def _plot_external_heatmap(df: pd.DataFrame, out: Path):
-    """Part B 热力图：K × family 的团大小均值。"""
-    pivot_data = df[df["family"].isin(["MS_Random", "MS_Degree", "MS_CTQW"])]
-    agg = pivot_data.groupby(["family", "K"])["objective"].mean().reset_index()
-    pivot = agg.pivot(index="family", columns="K", values="objective")
+    """Part B 热力图：K × display_name 的团大小均值。
+
+    MS_CTQW 按演化方法拆分多行，MS_Random / MS_Degree 各占一行。
+    """
+    ms_data = df[df["family"].isin(["MS_Random", "MS_Degree", "MS_CTQW"])]
+    # 用 display_name 替代 family，使 MS_CTQW 的两种方法各自成行
+    agg = ms_data.groupby(["display_name", "K"])["objective"].mean().reset_index()
+    pivot = agg.pivot(index="display_name", columns="K", values="objective")
 
     if pivot.empty:
         return
 
-    # 重新排列行顺序
-    row_order = ["MS_Random", "MS_Degree", "MS_CTQW"]
+    # 重新排列行：MS_Random → MS_Degree → MS_CTQW 的两个变体
+    row_order = ["MS_Random", "MS_Degree"]
+    for dname in sorted(pivot.index):
+        if dname.startswith("MS_CTQW"):
+            row_order.append(dname)
     pivot = pivot.reindex([r for r in row_order if r in pivot.index])
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(9, len(pivot) * 1.1 + 1.5))
     im = ax.imshow(pivot.values, aspect="auto", cmap="YlOrRd",
                     origin="upper", interpolation="nearest")
 
@@ -568,8 +627,8 @@ def _plot_external_heatmap(df: pd.DataFrame, out: Path):
     ax.set_xticks(range(len(pivot.columns)))
     ax.set_xticklabels([f"K={int(k)}" for k in pivot.columns])
     ax.set_yticks(range(len(pivot.index)))
-    ax.set_yticklabels([r.replace("MS_", "") for r in pivot.index])
-    ax.set_title("Multi-Start: Mean Clique Size by K & Seed Method",
+    ax.set_yticklabels([_short_label(r) for r in pivot.index])
+    ax.set_title("Multi-Start: Mean Clique Size by K & Method",
                  fontweight="bold")
     plt.colorbar(im, ax=ax, shrink=0.85, label="Clique Size |S|")
     plt.tight_layout()
@@ -578,18 +637,6 @@ def _plot_external_heatmap(df: pd.DataFrame, out: Path):
     plt.close(fig)
 
 
-def _short_name(full: str) -> str:
-    mapping = {
-        "ClassicalDegree": "DegGreedy",
-        "ClassicalClique": "CliqueGreedy",
-        "SimulatedAnnealing": "SimAnneal",
-    }
-    for k, v in mapping.items():
-        if full.startswith(k):
-            return v
-    if full.startswith("QuantumGreedy"):
-        return full.replace("QuantumGreedy_", "QG_")
-    return full[:18]
 
 
 # ============================================================
