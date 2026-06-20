@@ -20,6 +20,7 @@ def run_with_timeout(
     algo: BaseAlgorithm,
     instance: GraphInstance,
     timeout_sec: float,
+    verbose: bool = True,
 ) -> AlgorithmResult:
     """在子进程中运行 algo.solve(instance)，超时返回标记结果。
 
@@ -27,13 +28,18 @@ def run_with_timeout(
         algo: 算法对象（必须可 pickle）。
         instance: 图实例（必须可 pickle）。
         timeout_sec: 超时门限（秒）。None 或 ≤0 表示不设超时，主进程直接运行。
+        verbose: 是否在终端输出状态信息（默认 True）。
 
     返回:
         AlgorithmResult。若超时，result.timed_out = True，
         result.objective = NaN，result.solution = []。
     """
     if timeout_sec is None or timeout_sec <= 0:
-        return algo.solve(instance)
+        result = algo.solve(instance)
+        if verbose:
+            print(f"  [OK] {algo.name} on {instance.sample_id} "
+                  f"(no timeout, obj={result.objective})")
+        return result
 
     ctx = mp.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=False)
@@ -51,7 +57,13 @@ def run_with_timeout(
         parent_conn.close()
 
         if status == "ok":
+            if verbose:
+                print(f"  [OK] {algo.name} on {instance.sample_id} "
+                      f"(obj={payload.objective}, {payload.runtime:.1f}s)")
             return payload
+
+        if verbose:
+            print(f"  [ERROR] {algo.name} on {instance.sample_id}: {payload}")
         return _make_result(
             algo, instance, timeout_sec,
             timed_out=False, extra_params={"error": payload},
@@ -60,6 +72,9 @@ def run_with_timeout(
         p.terminate()
         p.join()
         parent_conn.close()
+        if verbose:
+            print(f"  [TIMEOUT] {algo.name} on {instance.sample_id} "
+                  f"(limit={timeout_sec:.0f}s)")
         return _make_result(algo, instance, timeout_sec, timed_out=True)
 
 
