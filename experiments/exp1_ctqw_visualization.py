@@ -25,7 +25,7 @@
 """
 
 import argparse
-import glob
+import json
 import os
 import sys
 from pathlib import Path
@@ -33,6 +33,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import pandas as pd
 
 # 确保可以从项目根目录导入 src
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -314,7 +315,9 @@ def run_visualization_experiment(instance: GraphInstance,
     print(f"  目标节点平均概率: {np.mean(target_probs):.6f}")
     print(f"  背景节点平均概率: {np.mean(bg_probs):.6f}")
     print(f"  Ratio = {ratio:.4f}")
-    print(f"  Ratio > 1: {'是 ✓ (目标区域概率集中)' if ratio > 1 else '否 ✗ (CTQW 未在目标区域形成概率集中)'}")
+    concentration = "是 (目标区域概率集中)" if ratio > 1 else \
+        "否 (CTQW 未在目标区域形成概率集中)"
+    print(f"  Ratio > 1: {concentration}")
 
     # 3. 绘制概率分布图
     safe_id = sample_id.replace("/", "_")
@@ -340,41 +343,52 @@ def run_visualization_experiment(instance: GraphInstance,
     }
 
 
-def find_instance(task_type: str, n: int | None = None,
-                  p: float | None = None, k: int | None = None) -> str | None:
-    """根据条件查找一个测试实例。
+def find_instances(task_type: str, n: int | None = None,
+                   p: float | None = None, k: int | None = None,
+                   max_n: int | None = None,
+                   limit: int | None = None) -> list[str]:
+    """根据条件查找测试实例。
 
     返回:
-        匹配的 JSON 文件路径，或 None。
+        匹配的 JSON 文件路径列表。
     """
     data_dir = Path(__file__).resolve().parent.parent / "datasets" / "data" \
                / "artificial" / task_type
 
     if not data_dir.is_dir():
-        return None
+        return []
 
-    patterns = []
-    if n is not None and p is not None and k is not None:
-        # 精确匹配
-        if task_type == "maximum_clique":
-            patterns.append(f"*_n{n}_*p*_k{k}/*.json")
-        else:
-            patterns.append(f"*_n{n}_*p*_k{k}_*/*.json")
+    p_token = str(p).replace(".", "") if p is not None else None
+    matches: list[str] = []
+    for group_dir in sorted(p for p in data_dir.iterdir() if p.is_dir()):
+        group_n = _extract_n(group_dir.name)
+        if n is not None and group_n != n:
+            continue
+        if max_n is not None and group_n > max_n:
+            continue
+        if p_token is not None and f"_p{p_token}_" not in group_dir.name:
+            continue
+        if k is not None and f"_k{k}" not in group_dir.name:
+            continue
+        for fpath in sorted(group_dir.glob("*.json")):
+            matches.append(str(fpath))
+            if limit is not None and len(matches) >= limit:
+                return matches
 
-    # 宽松匹配
-    if n is not None:
-        patterns.append(f"*_n{n}_*/*.json")
+    return matches
 
-    # 遍历所有匹配模式
-    for pattern in patterns:
-        for fpath in sorted(data_dir.glob(pattern)):
-            return str(fpath)
 
-    # 回退：返回第一个找到的 JSON
-    for fpath in sorted(data_dir.rglob("*.json")):
-        return str(fpath)
+def find_instance(task_type: str, n: int | None = None,
+                  p: float | None = None, k: int | None = None) -> str | None:
+    """根据条件查找一个测试实例。"""
+    matches = find_instances(task_type, n=n, p=p, k=k, limit=1)
+    return matches[0] if matches else None
 
-    return None
+
+def _extract_n(dirname: str) -> int:
+    import re
+    m = re.search(r'_n(\d+)_', dirname)
+    return int(m.group(1)) if m else 999999
 
 
 def main():
@@ -391,43 +405,72 @@ def main():
     parser.add_argument("--lam", type=float, default=0.0, help="扰动强度")
     parser.add_argument("--init", choices=["uniform", "max_degree", "random"],
                         default="max_degree", help="初态初始化方式")
+    parser.add_argument("--all", action="store_true", default=False,
+                        help="批量运行匹配条件下的所有人工实例")
+    parser.add_argument("--max-n", type=int, default=None,
+                        help="批量模式下仅使用 n≤max_n 的实例")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="批量模式下最多运行多少个实例")
     parser.add_argument("--save", action="store_true", default=True,
                         help="保存图表（默认启用）")
     args = parser.parse_args()
 
     # 查找测试实例
     if args.instance:
-        instance_path = args.instance
+        instance_paths = [args.instance]
+    elif args.all:
+        explicit_n = "--n" in sys.argv
+        instance_paths = find_instances(args.task, n=args.n if explicit_n else None,
+                                        p=args.p, k=args.k,
+                                        max_n=args.max_n,
+                                        limit=args.limit)
     else:
         instance_path = find_instance(args.task, n=args.n, p=args.p, k=args.k)
+        instance_paths = [instance_path] if instance_path else []
 
-    if not instance_path or not os.path.isfile(instance_path):
+    instance_paths = [p for p in instance_paths if p and os.path.isfile(p)]
+    if not instance_paths:
         print(f"错误: 未找到测试实例。请先运行生成脚本。")
         print(f"  task={args.task}, n={args.n}, p={args.p}, k={args.k}")
         return
 
     print(f"实验一：CTQW 概率分布可视化")
-    print(f"  数据: {instance_path}")
+    print(f"  实例数: {len(instance_paths)}")
+    if len(instance_paths) == 1:
+        print(f"  数据: {instance_paths[0]}")
     print(f"  参数: t={args.t}, λ={args.lam}, init={args.init}")
 
-    instance = load_instance(instance_path)
-    result = run_visualization_experiment(
-        instance, t=args.t, lam=args.lam, init_method=args.init)
+    results = []
+    for idx, instance_path in enumerate(instance_paths, 1):
+        print(f"\n[{idx}/{len(instance_paths)}] {instance_path}")
+        instance = load_instance(instance_path)
+        result = run_visualization_experiment(
+            instance, t=args.t, lam=args.lam, init_method=args.init)
+        results.append(result)
 
     # 汇总
     print(f"\n{'=' * 60}")
     print("实验一完成。结果汇总:")
-    print(f"  Ratio = {result['ratio']:.4f}")
-    print(f"  目标平均概率 = {result['target_mean']:.6f}")
-    print(f"  背景平均概率 = {result['background_mean']:.6f}")
+    df = pd.DataFrame(results)
+    print(f"  样本数 = {len(df)}")
+    print(f"  Ratio 均值 = {df['ratio'].mean():.4f}")
+    print(f"  Ratio 中位数 = {df['ratio'].median():.4f}")
+    print(f"  Ratio > 1 比例 = {(df['ratio'] > 1).mean():.2%}")
     print(f"  图表目录: {RESULTS_DIR}")
 
     # 保存数值结果
-    import json
-    result_path = RESULTS_DIR / f"{result['sample_id']}_t{args.t}_lam{args.lam}.json"
+    if len(results) == 1:
+        result_path = RESULTS_DIR / f"{results[0]['sample_id']}_t{args.t}_lam{args.lam}.json"
+    else:
+        result_path = RESULTS_DIR / f"{args.task}_batch_t{args.t}_lam{args.lam}_n{len(results)}.json"
     with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+        json.dump(results[0] if len(results) == 1 else results,
+                  f, ensure_ascii=False, indent=2)
     print(f"  数值结果: {result_path}")
+
+    csv_path = RESULTS_DIR / f"{args.task}_batch_t{args.t}_lam{args.lam}_summary.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"  批量汇总 CSV: {csv_path}")
 
 
 if __name__ == "__main__":
