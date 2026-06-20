@@ -1,5 +1,4 @@
 .vscode/
-results/
 report/ppt/*.aux
 report/ppt/*.log
 report/ppt/*.nav

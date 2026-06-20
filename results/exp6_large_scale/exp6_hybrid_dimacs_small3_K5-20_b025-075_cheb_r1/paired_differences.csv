@@ -1,0 +1,6 @@
+method,baseline,n_pairs,mean_diff,median_diff,wins,ties,losses,win_rate
+MS_CTQW_cheb_d50,MS_Degree(same K),9,-0.2222222222222222,0.0,0,7,2,0.0
+MS_HybridSeed_b0.25_cheb_d50,MS_Degree(same K),9,-0.1111111111111111,0.0,0,8,1,0.0
+MS_HybridSeed_b0.5_cheb_d50,MS_Degree(same K),9,-0.1111111111111111,0.0,0,8,1,0.0
+MS_HybridSeed_b0.75_cheb_d50,MS_Degree(same K),9,-0.2222222222222222,0.0,0,7,2,0.0
+MS_Random,MS_Degree(same K),9,-0.7777777777777778,0.0,0,5,4,0.0
