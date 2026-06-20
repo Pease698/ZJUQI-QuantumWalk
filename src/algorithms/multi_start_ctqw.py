@@ -51,6 +51,9 @@ class _MultiStartBase(BaseAlgorithm):
     def _select_seeds(self, instance: GraphInstance, K: int) -> list[int]:
         raise NotImplementedError
 
+    def _extra_result_params(self) -> dict:
+        return {}
+
     def solve(self, instance: GraphInstance) -> AlgorithmResult:
         t_start = time.perf_counter()
 
@@ -88,7 +91,11 @@ class _MultiStartBase(BaseAlgorithm):
             runtime=runtime,
             iterations=total_iter,
             history=per_seed_log,
-            extra_params={"K": self.K, "n_seeds_tried": len(seeds)},
+            extra_params={
+                "K": self.K,
+                "n_seeds_tried": len(seeds),
+                **self._extra_result_params(),
+            },
         )
 
 
@@ -131,6 +138,53 @@ class MultiStartCTQWGreedy(_MultiStartBase):
         return [int(v) for v in top_idx]
 
 
+class MultiStartHybridSeedGreedy(_MultiStartBase):
+    """用 CTQW 概率和 Degree 融合分数选择 Top-K 起点。
+
+    seed_score(v) = beta * CTQW_norm(v) + (1 - beta) * Degree_norm(v)
+
+    beta 越大越偏向 CTQW 全局概率，beta 越小越接近 Degree 起点选择。
+    """
+
+    def __init__(self, K: int = 5, beta: float = 0.5, t: float = 1.0,
+                 evolution_method: str = "auto",
+                 krylov_dim: int | None = None,
+                 cheb_degree: int | None = None,
+                 name: str | None = None, seed: int = 0):
+        super().__init__(
+            K=K,
+            name=name or f"MultiStartHybridSeed(K={K},beta={beta:g})",
+            seed=seed,
+        )
+        if not 0.0 <= beta <= 1.0:
+            raise ValueError("beta must be in [0, 1]")
+        self.beta = beta
+        self.t = t
+        self.evolution_method = evolution_method
+        self.krylov_dim = krylov_dim
+        self.cheb_degree = cheb_degree
+
+    def _select_seeds(self, instance: GraphInstance, K: int) -> list[int]:
+        n = instance.num_nodes
+        adjacency = instance.adjacency
+
+        psi0 = np.ones(n, dtype=np.complex128) / np.sqrt(n)
+        psi_t = compute_ctqw_evolution(
+            adjacency, psi0, self.t,
+            method=self.evolution_method,
+            krylov_dim=self.krylov_dim,
+            cheb_degree=self.cheb_degree,
+        )
+        probs = np.abs(psi_t) ** 2
+        degrees = adjacency.sum(axis=1)
+        score = hybrid_seed_scores(probs, degrees, self.beta)
+        top_idx = np.argsort(score)[-K:][::-1]
+        return [int(v) for v in top_idx]
+
+    def _extra_result_params(self) -> dict:
+        return {"beta": self.beta}
+
+
 class MultiStartRandomGreedy(_MultiStartBase):
     """随机选 K 个起点的对照。
 
@@ -161,3 +215,23 @@ class MultiStartDegreeGreedy(_MultiStartBase):
         degrees = adjacency.sum(axis=1)
         top_idx = np.argsort(degrees)[-K:][::-1]
         return [int(v) for v in top_idx]
+
+
+def hybrid_seed_scores(ctqw_probs: np.ndarray,
+                       degrees: np.ndarray,
+                       beta: float) -> np.ndarray:
+    """计算 CTQW + Degree 融合起点评分。"""
+    return (
+        beta * _minmax_array(ctqw_probs)
+        + (1.0 - beta) * _minmax_array(degrees)
+    )
+
+
+def _minmax_array(values: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    v_min = float(values.min())
+    v_max = float(values.max())
+    denom = v_max - v_min
+    if denom < eps:
+        return np.full_like(values, 0.5, dtype=np.float64)
+    return (values - v_min) / denom

@@ -17,6 +17,7 @@
 """
 
 import numpy as np
+from scipy import sparse
 from scipy.linalg import expm
 from scipy.special import jv as bessel_j
 
@@ -56,7 +57,7 @@ def compute_ctqw_evolution(
     if method == "exact":
         return _evolution_exact(H, psi0, t)
     elif method == "krylov":
-        m = kwargs.get("krylov_dim", min(100, n))
+        m = kwargs.get("krylov_dim") or min(100, n)
         tol = kwargs.get("krylov_tol", 1e-10)
         return _evolution_krylov(H, psi0, t, m, tol)
     elif method == "chebyshev":
@@ -76,6 +77,8 @@ def compute_ctqw_evolution(
 
 def _evolution_exact(H: np.ndarray, psi0: np.ndarray, t: float) -> np.ndarray:
     """精确矩阵指数：exp(-iHt) @ psi0（O(n³)）。"""
+    if sparse.issparse(H):
+        H = H.toarray()
     return expm(-1j * H * t) @ psi0
 
 

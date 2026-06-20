@@ -122,6 +122,7 @@ def run_comparison_on_instance(instance: GraphInstance,
             row = result.to_dict()
             row["run_id"] = run_id
             row["seed"] = seed
+            row["n"] = instance.num_nodes
             rows.append(row)
     return rows
 
@@ -173,7 +174,9 @@ def _rebuild_algo(template, seed: int):
 
 def run_batch_experiment(task_type: str,
                           small: bool = True,
-                          data_source: str = "artificial") -> pd.DataFrame:
+                          data_source: str = "artificial",
+                          max_n: int | None = None,
+                          repeat: int | None = None) -> pd.DataFrame:
     """批量运行对比实验。
 
     参数:
@@ -185,12 +188,14 @@ def run_batch_experiment(task_type: str,
         汇总 DataFrame。
     """
     # 根据数据来源发现实例
-    instances_with_labels = _discover_instances(task_type, data_source, small)
+    instances_with_labels = _discover_instances(task_type, data_source, small, max_n)
     if not instances_with_labels:
         return pd.DataFrame()
 
     # 确定合理的重复次数
-    if data_source == "external":
+    if repeat is not None:
+        repeat_runs = repeat
+    elif data_source == "external":
         repeat_runs = 10  # 外部数据单实例，需更多运行内统计
     else:
         repeat_runs = REPEAT_RUNS  # 4 次，配合 5 实例 → 20 数据点
@@ -201,6 +206,8 @@ def run_batch_experiment(task_type: str,
     print(f"\n实验二：算法对比实验")
     print(f"  任务类型: {task_type}")
     print(f"  数据来源: {data_source}")
+    if max_n is not None:
+        print(f"  最大节点数: n≤{max_n}")
     print(f"  实例总数: {total_instances}")
     print(f"  每实例重复: {repeat_runs} 次")
     print(f"  预期总记录: {total_instances * 4 * repeat_runs} 条")
@@ -227,7 +234,7 @@ def run_batch_experiment(task_type: str,
           f"共 {len(df)} 条记录")
 
     # 保存
-    suffix = f"{data_source}_small" if small and data_source == "artificial" else data_source
+    suffix = _result_tag(data_source, small, max_n, repeat_runs)
     csv_path = RESULTS_DIR / f"{task_type}_{suffix}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8")
     print(f"结果已保存至: {csv_path}")
@@ -235,7 +242,8 @@ def run_batch_experiment(task_type: str,
     return df
 
 
-def _discover_instances(task_type: str, data_source: str, small: bool
+def _discover_instances(task_type: str, data_source: str, small: bool,
+                         max_n: int | None = None
                          ) -> list[tuple]:
     """根据数据来源发现所有测试实例。
 
@@ -248,7 +256,10 @@ def _discover_instances(task_type: str, data_source: str, small: bool
         dirs = get_data_dirs(task_type)
         if not dirs:
             return []
-        if small:
+        if max_n is not None:
+            dirs = [d for d in dirs if _extract_n(d.name) <= max_n]
+            print(f"人工数据（n≤{max_n}）：筛选到 {len(dirs)} 个参数组目录")
+        elif small:
             dirs = [d for d in dirs if _extract_n(d.name) <= 50]
             print(f"人工数据（小规模 n≤50）：筛选到 {len(dirs)} 个参数组目录")
         else:
@@ -269,6 +280,9 @@ def _discover_instances(task_type: str, data_source: str, small: bool
         print(f"外部数据：{len(json_files)} 个实例")
 
         for fpath in json_files:
+            inst = load_instance(fpath)
+            if max_n is not None and inst.num_nodes > max_n:
+                continue
             stem = fpath.stem
             if stem.startswith("ext_mc_"):
                 label = stem[7:]
@@ -276,7 +290,7 @@ def _discover_instances(task_type: str, data_source: str, small: bool
                 label = stem[7:]
             else:
                 label = stem
-            instances.append((load_instance(fpath), label))
+            instances.append((inst, label))
 
     return instances
 
@@ -286,6 +300,19 @@ def _extract_n(dirname: str) -> int:
     import re
     m = re.search(r'_n(\d+)_', dirname)
     return int(m.group(1)) if m else 999
+
+
+def _result_tag(data_source: str, small: bool, max_n: int | None,
+                repeat_runs: int | None = None) -> str:
+    if max_n is not None:
+        tag = f"{data_source}_nle{max_n}"
+    elif small and data_source == "artificial":
+        tag = f"{data_source}_small"
+    else:
+        tag = data_source
+    if repeat_runs is not None and repeat_runs != REPEAT_RUNS:
+        tag = f"{tag}_r{repeat_runs}"
+    return tag
 
 
 # ============================================================
@@ -308,6 +335,12 @@ def analyze_and_plot(df: pd.DataFrame, task_type: str, tag: str = "small"):
     # 按基名聚合
     df = df.copy()
     df["algo_base"] = df["algorithm"].apply(_base_name)
+    if "n_group" not in df.columns:
+        if "n" in df.columns:
+            df["n_group"] = "n=" + df["n"].astype(int).astype(str)
+        elif "sample_id" in df.columns:
+            df["n_group"] = df["sample_id"].apply(
+                lambda s: f"n={s.split('_')[1]}" if "_" in s else s)
 
     # ---- 汇总统计 ----
     print(f"\n{'=' * 60}")
@@ -394,6 +427,23 @@ def analyze_and_plot(df: pd.DataFrame, task_type: str, tag: str = "small"):
     summary_path = RESULTS_DIR / f"{task_type}_{tag}_summary.csv"
     summary_df.to_csv(summary_path, index=False, encoding="utf-8")
     print(f"汇总统计已保存至: {summary_path}")
+
+    if "source_label" in df.columns and "n_group" in df.columns:
+        source_summary = (
+            df.groupby(["source_label", "n_group", "algo_base"], dropna=False)
+            .agg(
+                objective_mean=("objective", "mean"),
+                objective_std=("objective", "std"),
+                runtime_median=("runtime", "median"),
+                runtime_p95=("runtime", lambda s: s.quantile(0.95)),
+                n_runs=("objective", "size"),
+            )
+            .reset_index()
+            .sort_values(["n_group", "source_label", "algo_base"])
+        )
+        source_path = RESULTS_DIR / f"{task_type}_{tag}_by_source.csv"
+        source_summary.to_csv(source_path, index=False, encoding="utf-8")
+        print(f"按参数组汇总已保存至: {source_path}")
 
     # ---- 显著性检验 ----
     # 基线：MC 用 ClassicalClique（更强的经典对照），DS 用 ClassicalDense
@@ -593,14 +643,14 @@ def paired_significance_test(df: pd.DataFrame, baseline: str
         if np.isnan(p_val):
             sig = "n/a"
         elif p_val < 0.001:
-            sig = ("✓ p<0.001 显著优于" if mean_d > 0
-                   else "✗ p<0.001 显著劣于") + f" {baseline}"
+            sig = ("p<0.001 显著优于" if mean_d > 0
+                   else "p<0.001 显著劣于") + f" {baseline}"
         elif p_val < 0.01:
-            sig = ("✓ p<0.01 显著优于" if mean_d > 0
-                   else "✗ p<0.01 显著劣于") + f" {baseline}"
+            sig = ("p<0.01 显著优于" if mean_d > 0
+                   else "p<0.01 显著劣于") + f" {baseline}"
         elif p_val < 0.05:
-            sig = ("✓ p<0.05 显著优于" if mean_d > 0
-                   else "✗ p<0.05 显著劣于") + f" {baseline}"
+            sig = ("p<0.05 显著优于" if mean_d > 0
+                   else "p<0.05 显著劣于") + f" {baseline}"
         else:
             sig = f"~ 与 {baseline} 无显著差异 (p={p_val:.3f})"
 
@@ -634,11 +684,17 @@ def main():
                         help="仅使用小规模实例 n≤50（默认开启，仅对 artificial 有效）")
     parser.add_argument("--full", action="store_true", default=False,
                         help="使用全部数据集（耗时较长）")
+    parser.add_argument("--max-n", type=int, default=None,
+                        help="仅使用 n≤max_n 的实例；比 --small/--full 更细粒度")
+    parser.add_argument("--repeat", type=int, default=None,
+                        help="覆盖每个实例重复次数")
     parser.add_argument("--csv", type=str, default=None,
                         help="直接分析已有的 CSV 文件，跳过运行")
     args = parser.parse_args()
 
     if args.full:
+        args.small = False
+    if args.max_n is not None:
         args.small = False
 
     if args.csv:
@@ -650,13 +706,22 @@ def main():
     print(f"实验二：算法对比（{args.task}）")
     print(f"  数据来源: {args.data_source}")
     if args.data_source == "artificial":
-        print(f"  模式: {'小规模 (n≤50)' if args.small else '全部数据集'}")
+        if args.max_n is not None:
+            print(f"  模式: n≤{args.max_n}")
+        else:
+            print(f"  模式: {'小规模 (n≤50)' if args.small else '全部数据集'}")
+    if args.repeat is not None:
+        print(f"  每实例重复: {args.repeat}")
     print(f"  结果目录: {RESULTS_DIR}")
 
     df = run_batch_experiment(args.task, small=args.small,
-                               data_source=args.data_source)
+                               data_source=args.data_source,
+                               max_n=args.max_n,
+                               repeat=args.repeat)
     if not df.empty:
-        tag = f"{args.data_source}_small" if args.small and args.data_source == "artificial" else args.data_source
+        repeat_runs = args.repeat if args.repeat is not None else (
+            10 if args.data_source == "external" else REPEAT_RUNS)
+        tag = _result_tag(args.data_source, args.small, args.max_n, repeat_runs)
         analyze_and_plot(df, args.task, tag)
 
     print(f"\n实验二完成。")

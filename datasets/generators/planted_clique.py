@@ -97,3 +97,111 @@ def generate_clique_batch(n: int, p: float, k: int,
         save_json(data, filepath)
         paths.append(filepath)
     return paths
+
+
+def generate_degree_misleading_clique(
+    n: int,
+    p: float,
+    k: int,
+    seed: int,
+    index: int = 0,
+    n_decoys: int | None = None,
+    decoy_degree_prob: float = 0.75,
+) -> dict:
+    """生成带高 degree 诱饵节点的植入团实例。
+
+    诱饵节点连接大量背景点以抬高度数，但诱饵之间不连边，且每个诱饵至少
+    缺一条到答案团的边，因此不能和答案团合并成更大的团。
+    """
+    rng = random.Random(seed)
+    n_decoys = n_decoys or max(k, min(3 * k, n // 5))
+
+    all_nodes = list(range(n))
+    answer_nodes = sorted(rng.sample(all_nodes, k))
+    answer_set = set(answer_nodes)
+    remaining = [v for v in all_nodes if v not in answer_set]
+    decoy_nodes = sorted(rng.sample(remaining, min(n_decoys, len(remaining))))
+    decoy_set = set(decoy_nodes)
+
+    edges = []
+    answer_edges = []
+    forbidden_edges = set()
+
+    # 诱饵之间不连边，防止诱饵互相组成大团。
+    for i, u in enumerate(decoy_nodes):
+        for v in decoy_nodes[i + 1:]:
+            forbidden_edges.add((u, v) if u < v else (v, u))
+
+    # 每个诱饵缺少一条到答案团的边，防止拼入完整答案团。
+    for u in decoy_nodes:
+        blocked = rng.choice(answer_nodes)
+        forbidden_edges.add((u, blocked) if u < blocked else (blocked, u))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            edge = (i, j)
+            if edge in forbidden_edges:
+                continue
+            if i in answer_set and j in answer_set:
+                edges.append([i, j])
+                answer_edges.append([i, j])
+            elif i in decoy_set or j in decoy_set:
+                if rng.random() < decoy_degree_prob:
+                    edges.append([i, j])
+            elif rng.random() < p:
+                edges.append([i, j])
+
+    edges_set = set(tuple(sorted(e)) for e in edges)
+    assert verify_clique(edges_set, answer_nodes), \
+        f"植入团验证失败，seed={seed}"
+
+    p_str = str(p).replace(".", "")
+    sample_id = f"mc_mislead_n{n}_p{p_str}_k{k}_{index:03d}"
+    return {
+        "sample_id": sample_id,
+        "num_nodes": n,
+        "num_edges": len(edges),
+        "edges": edges,
+        "task_type": "maximum_clique",
+        "is_artificial": True,
+        "parameters": {
+            "num_nodes": n,
+            "bg_edge_prob": p,
+            "answer_size": k,
+            "answer_edge_density": 1.0,
+            "variant": "degree_misleading",
+            "n_decoys": len(decoy_nodes),
+            "decoy_degree_prob": decoy_degree_prob,
+        },
+        "answer_nodes": answer_nodes,
+        "answer_edges": answer_edges,
+        "decoy_nodes": decoy_nodes,
+    }
+
+
+def generate_degree_misleading_clique_batch(
+    n: int,
+    p: float,
+    k: int,
+    num_instances: int,
+    output_dir: str,
+    start_seed: int = 0,
+    n_decoys: int | None = None,
+    decoy_degree_prob: float = 0.75,
+) -> list[str]:
+    """批量生成 degree-misleading 最大团实例。"""
+    paths = []
+    for i in range(num_instances):
+        data = generate_degree_misleading_clique(
+            n=n,
+            p=p,
+            k=k,
+            seed=start_seed + i,
+            index=i,
+            n_decoys=n_decoys,
+            decoy_degree_prob=decoy_degree_prob,
+        )
+        filepath = f"{output_dir}/{data['sample_id']}.json"
+        save_json(data, filepath)
+        paths.append(filepath)
+    return paths

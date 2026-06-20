@@ -9,6 +9,7 @@ from pathlib import Path
 
 import networkx as nx
 import numpy as np
+from scipy import sparse
 
 
 @dataclass
@@ -30,6 +31,7 @@ class GraphInstance:
 
     # 惰性构建的缓存
     _adjacency: np.ndarray | None = None
+    _adjacency_sparse: sparse.csr_matrix | None = None
     _nx_graph: nx.Graph | None = None
 
     @property
@@ -38,6 +40,14 @@ class GraphInstance:
         if self._adjacency is None:
             self._adjacency = build_adjacency(self.num_nodes, self.edges)
         return self._adjacency
+
+    @property
+    def adjacency_sparse(self) -> sparse.csr_matrix:
+        """稀疏 CSR 邻接矩阵，供大图 CTQW 近似方法使用。"""
+        if self._adjacency_sparse is None:
+            self._adjacency_sparse = build_sparse_adjacency(
+                self.num_nodes, self.edges)
+        return self._adjacency_sparse
 
     @property
     def nx_graph(self) -> nx.Graph:
@@ -121,3 +131,16 @@ def build_adjacency(n: int, edges: list[tuple[int, int]]) -> np.ndarray:
         A[u, v] = 1.0
         A[v, u] = 1.0
     return A
+
+
+def build_sparse_adjacency(n: int, edges: list[tuple[int, int]]) -> sparse.csr_matrix:
+    """从边列表构建 CSR 稀疏邻接矩阵。"""
+    if not edges:
+        return sparse.csr_matrix((n, n), dtype=np.float64)
+    rows = []
+    cols = []
+    for u, v in edges:
+        rows.extend([u, v])
+        cols.extend([v, u])
+    data = np.ones(len(rows), dtype=np.float64)
+    return sparse.csr_matrix((data, (rows, cols)), shape=(n, n))

@@ -127,6 +127,9 @@ python -m converters.convert_dimacs
 | `--t` | CTQW 演化时间 | 1.0 |
 | `--lam` | 扰动强度 λ | 0.0 |
 | `--init` | 初态方式: uniform / max_degree / random | `max_degree` |
+| `--all` | 批量运行匹配条件下的人工实例 | 关闭 |
+| `--max-n` | 批量模式下仅使用 n≤max_n 的实例 | — |
+| `--limit` | 批量模式下最多运行多少个实例 | — |
 
 产出：
 - 概率分布节点图（目标区域高亮）
@@ -135,6 +138,10 @@ python -m converters.convert_dimacs
 
 ```bash
 python3 experiments/exp1_ctqw_visualization.py --task maximum_clique --n 30 --k 5
+
+# 扩展为批量样本，并额外输出 batch summary CSV
+python3 experiments/exp1_ctqw_visualization.py \
+    --task maximum_clique --all --max-n 50 --limit 10
 ```
 
 ### 实验二：算法对比（§13.3）★ 核心实验
@@ -147,6 +154,8 @@ python3 experiments/exp1_ctqw_visualization.py --task maximum_clique --n 30 --k 
 | `--data-source` | `artificial`（人工）或 `external`（DIMACS） | `artificial` |
 | `--small` | 仅 n≤50（仅对 artificial 有效） | 开启 |
 | `--full` | 使用全部数据（覆盖 --small） | — |
+| `--max-n` | 仅使用 n≤max_n 的实例；比 --small/--full 更细粒度 | — |
+| `--repeat` | 覆盖每个实例重复次数 | artificial=4, external=10 |
 | `--csv` | 直接分析已有 CSV，跳过运行 | — |
 
 对照方法：ClassicalDegree、 ClassicalClique/ClassicalDense、 SimulatedAnnealing、 QuantumGuidedGreedy
@@ -155,6 +164,7 @@ python3 experiments/exp1_ctqw_visualization.py --task maximum_clique --n 30 --k 
 - 箱线图（目标值 + 运行时间）
 - 按图规模分组的柱状图（带误差棒）
 - 汇总统计 CSV
+- 按参数组/规模细分的 `_by_source.csv`
 
 ```bash
 # 小规模人工数据快速验证
@@ -162,6 +172,10 @@ python3 experiments/exp2_algorithm_comparison.py --task maximum_clique --small
 
 # 全部人工数据（耗时较长）
 python3 experiments/exp2_algorithm_comparison.py --task maximum_clique --full
+
+# 中等范围扩样本：跑到 n≤100，每实例重复 2 次
+python3 experiments/exp2_algorithm_comparison.py \
+    --task maximum_clique --max-n 100 --repeat 2
 
 # 外部 DIMACS 数据（每实例重复 10 次）
 python3 experiments/exp2_algorithm_comparison.py \
@@ -179,6 +193,8 @@ python3 experiments/exp2_algorithm_comparison.py \
 | `--task` | 任务类型 | `maximum_clique` |
 | `--small` | 仅 n≤50 | 开启 |
 | `--full` | 全部人工数据 | — |
+| `--max-n` | 仅使用 n≤max_n 的人工实例；比 --small/--full 更细粒度 | — |
+| `--repeat` | 每个实例重复次数 | 4 |
 | `--csv` | 分析已有 CSV | — |
 
 消融设置：
@@ -191,9 +207,14 @@ python3 experiments/exp2_algorithm_comparison.py \
 - 四组箱线图对比
 - 相对基线提升柱状图
 - 汇总统计 CSV
+- 按参数组/规模细分的 `_by_source.csv`
 
 ```bash
 python3 experiments/exp3_ablation.py --task maximum_clique --small
+
+# 中等范围扩样本：跑到 n≤100，每实例重复 2 次
+python3 experiments/exp3_ablation.py \
+    --task maximum_clique --max-n 100 --repeat 2
 ```
 
 ### 实验四：参数敏感性分析（§13.5）
@@ -296,10 +317,18 @@ python3 experiments/exp6_pre_tune.py --timeout 120     # 自定义超时
 
 ### 实验六：大规模图 CTQW 近似方法对比
 
-分两部分独立运行，使用 `--timeout` 控制单次运行上限。
+分两部分独立运行，使用 `--timeout` 控制单次运行上限。当前脚本已经加入：
+
+- **CTQW seed 排名复用**：external 模式下，同一图、同一演化方法只计算一次 CTQW 概率排序，K=5/10/20/30 直接截取前 K 个 seed。
+- **稀疏矩阵演化**：external CTQW seed 选择使用 CSR 稀疏邻接矩阵做 Krylov / Chebyshev 矩阵-向量乘法，降低大图内存与计算开销。
+- **并行调度**：`--workers N` 用外层线程池并行调度 solve；每个 solve 仍由独立子进程做超时隔离。
+- **断点续跑**：长任务持续写入 `full_results.partial.csv`，`--resume` 会按 `(sample_id, algo_key, run_id)` 跳过已完成任务。
+- **报告表格**：每个输出目录除 `full_results.csv` 外，还写出 `summary_by_method.csv`、`summary_by_source.csv`、`paired_differences.csv`。
+- **Hybrid seed 选择**：external 模式支持 `MS_HybridSeed(K,beta)`，用 `beta * CTQW_norm + (1-beta) * Degree_norm` 选择 multi-start 起点；通过 `--hybrid-betas` 扫描 beta。
 
 数据范围（写死在脚本常量中）：
 - **人工数据**：仅 n ∈ {300, 500}（10 个参数组，50 个实例）
+- **Degree-misleading 人工数据**：`--data-source misleading` 加载 6 组、30 个困难样本
 - **DIMACS 外部数据**：5 个指定数据集（gen200, C250-9, p-hat300-3, C1000-9, C2000-9）
 
 演化方法（仅两种近似）：
@@ -326,6 +355,7 @@ python3 experiments/exp6_pre_tune.py --timeout 120     # 自定义超时
 | MS_Degree × K | 5,10,20,30 | — | 4 |
 | MS_CTQW × K × krylov_m30 | 5,10,20,30 | Krylov m=30 | 4 |
 | MS_CTQW × K × cheb_d50 | 5,10,20,30 | Chebyshev d=50 | 4 |
+| MS_HybridSeed × K × beta × method | 自定义 | 自定义 | `len(K)*len(beta)*len(method)` |
 | **每实例合计** | | | **17 算法** |
 
 **运行次数**：人工数据每实例 2 次，DIMACS 每实例 3 次。
@@ -361,9 +391,33 @@ python3 experiments/exp6_large_scale_approx.py \
 # 串行模式（调试/低内存环境）
 python3 experiments/exp6_large_scale_approx.py --mode embedded --workers 0
 
-# 自定义超时和重复次数
+# Hybrid seed 矩阵：K={5,10,20}, beta={0.25,0.5,0.75}, Chebyshev d=50
 python3 experiments/exp6_large_scale_approx.py \
-    --mode embedded --timeout 600 --repeat 3
+    --mode external --data-source misleading \
+    --methods cheb_d50 --K-values 5 10 20 \
+    --hybrid-betas 0.25 0.5 0.75 --repeat 1
+
+# DIMACS 子集过滤，适合先跑 gen/C250/p-hat 等较小外部图
+python3 experiments/exp6_large_scale_approx.py \
+    --mode external --data-source dimacs \
+    --dimacs-labels C250-9 gen200-p0-9-44 p-hat300-3 \
+    --methods cheb_d50 --K-values 5 10 20 \
+    --hybrid-betas 0.25 0.5 0.75 --repeat 1
+
+# 自定义超时、重复次数和并行 solve 数量
+python3 experiments/exp6_large_scale_approx.py \
+    --mode embedded --timeout 600 --repeat 3 --workers 2
+
+# 断点续跑：优先读取 full_results.csv，其次读取 full_results.partial.csv
+python3 experiments/exp6_large_scale_approx.py \
+    --mode external --data-source dimacs --K-values 10 \
+    --timeout 600 --workers 2 --resume \
+    --output results/exp6_large_scale/exp6_external_dimacs_K10_r1_t600_w2
+
+# 分批跑大图：限制实例数，适合先估计耗时
+python3 experiments/exp6_large_scale_approx.py \
+    --mode external --data-source dimacs --K-values 10 \
+    --timeout 600 --workers 2 --limit-instances 3
 ```
 
 **并行执行说明**：
@@ -381,7 +435,58 @@ python3 experiments/exp6_large_scale_approx.py \
 - **外层**（`ProcessPoolExecutor`）：`spawn` 上下文，避免 fork 的 numpy 状态问题
 - **大图保护**：n > `--serial-threshold`（默认 1000）的实例自动降为串行，防止多进程同时加载大型邻接矩阵导致 OOM
 - **烟雾测试**（`--smoke`）始终串行运行
+- 大图建议从 `--workers 2` 开始；过大可能因为矩阵复制和 BLAS 线程竞争导致内存压力升高。
 - `--workers 0` 回退为完全串行模式
+- 长任务会持续写入 `full_results.partial.csv`，中断后仍可保留已完成记录。
+
+### 量子参数调优脚本
+
+#### 已运行的大规模结果
+
+| 批次 | 输出目录 | 记录数 | 样本数 | 超时 | 主要结论 |
+|---|---|---:|---:|---:|---|
+| embedded artificial n=300/500, repeat=2 | `results/exp6_large_scale/exp6_embedded_n300-500` | 500 | 50 | 0 | ClassicalDegree / ClassicalClique / QuantumGreedy 平均团大小均为 22.00；SA 为 11.67 |
+| external artificial n=300/500, K=5/10/20/30, repeat=1 | `results/exp6_large_scale/exp6_external_n300-500_K5-30_r1` | 850 | 50 | 0 | MS_Degree 平均 22.00；MS_CTQW 从 K=5 的 20.70 提升到 K=30 的 22.00 |
+| embedded DIMACS, repeat=1, timeout=120 | `results/exp6_large_scale/exp6_embedded_dimacs_r1` | 25 | 5 | 0 | ClassicalClique 平均 47.00；QuantumGreedy 约 40.2 |
+| external DIMACS, K=5, repeat=1, timeout=1800 | `results/exp6_large_scale/exp6_external_dimacs_K5_r1` | 25 | 5 | 0 | 延长超时并 retry 后无超时；MS_CTQW 平均 48.4，ClassicalClique 47.0 |
+| external DIMACS, K=10, repeat=1, timeout=600, workers=2 | `results/exp6_large_scale/exp6_external_dimacs_K10_r1_t600_w2` | 25 | 5 | 0 | K=10 后无超时；MS_CTQW 平均约 48.5，MS_Degree 48.8，ClassicalClique 47.0 |
+| external DIMACS, K=20/30, repeat=1, timeout=2400, workers=2 | `results/exp6_large_scale/exp6_external_dimacs_K20-30_r1_t900_w2` | 45 | 5 | 0 | retry C2000-9 超时任务后无超时；MS_Random 49.3，MS_Degree 48.9，MS_CTQW 约 48.6-48.8 |
+| external DIMACS, K=5/10/20/30 合并 | `results/exp6_large_scale/exp6_external_dimacs_K5-30_r1_all` | 85 | 5 | 0 | 全 K 合并后 MS_CTQW_cheb_d50 48.65、MS_Degree 48.60、MS_CTQW_krylov_m30 48.50，均高于 ClassicalClique 47.0 |
+| hybrid misleading, K=5/10/20, beta=0.25/0.5/0.75, cheb_d50, repeat=1 | `results/exp6_large_scale/exp6_hybrid_misleading_K5-20_b025-075_cheb_r1` | 570 | 30 | 0 | MS_CTQW 14.62，Hybrid beta=0.75 为 14.52，MS_Degree 14.50；Hybrid 未超过纯 CTQW，beta 越高略好 |
+| hybrid DIMACS small3, K=5/10/20, beta=0.25/0.5/0.75, cheb_d50, repeat=1 | `results/exp6_large_scale/exp6_hybrid_dimacs_small3_K5-20_b025-075_cheb_r1` | 57 | 3 | 0 | MS_Degree 37.89，Hybrid beta=0.25/0.5 为 37.78，MS_CTQW 37.67；K=20 时各 multi-start 方法均值均为 38.0 |
+
+推荐继续扩展命令：
+
+```bash
+python3 experiments/exp6_large_scale_approx.py \
+    --mode external --data-source dimacs --repeat 1 \
+    --K-values 20 30 --timeout 900 --workers 2 \
+    --output results/exp6_large_scale/exp6_external_dimacs_K20-30_r1_t900_w2
+```
+
+### Degree-Misleading 困难样本
+
+普通 planted clique 上 degree 类方法很强，难以体现 CTQW 全局信号的价值。为此新增了 degree-misleading 数据生成器：诱饵节点连接大量背景点以抬高度数，但诱饵之间不连边，且每个诱饵至少缺一条到答案团的边，因此不能拼入答案团。
+
+```bash
+python3 datasets/generate_misleading.py --dry-run
+python3 datasets/generate_misleading.py
+```
+
+默认生成 6 组、共 30 个最大团样本：
+
+| 组 | n | p | k | 实例数 |
+|---|---:|---:|---:|---:|
+| `mc_mislead_n100_p005_k10` | 100 | 0.05 | 10 | 5 |
+| `mc_mislead_n100_p01_k10` | 100 | 0.10 | 10 | 5 |
+| `mc_mislead_n200_p005_k16` | 200 | 0.05 | 16 | 5 |
+| `mc_mislead_n200_p01_k16` | 200 | 0.10 | 16 | 5 |
+| `mc_mislead_n300_p005_k20` | 300 | 0.05 | 20 | 5 |
+| `mc_mislead_n300_p01_k20` | 300 | 0.10 | 20 | 5 |
+
+已跑全部 misleading 快速对比，输出在 `results/exp2_algorithm_comparison/maximum_clique_misleading_all_r1.csv`：120 条记录、30 个样本、每实例 1 次。当前均值为 ClassicalClique 12.43、ClassicalDegree 12.63、QuantumGuidedGreedy 9.97、SimulatedAnnealing 10.20；这组结果显示困难样本会明显拉低嵌入式 QuantumGuidedGreedy，适合作为后续参数调优和 external CTQW seed 策略验证集。n=100 子集结果仍保留在 `results/exp2_algorithm_comparison/maximum_clique_misleading_n100_r1.csv`。
+
+已新增 external hybrid seed 矩阵，输出在 `results/exp6_large_scale/exp6_hybrid_misleading_K5-20_b025-075_cheb_r1`：570 条记录、30 个样本、无超时。总体均值为 MS_CTQW_cheb_d50 14.62、MS_HybridSeed_beta0.75 14.52、MS_Degree 14.50、MS_Random 13.86、ClassicalClique 12.43。按 K 看，K=20 时 MS_CTQW 14.97、Hybrid beta=0.75 14.80、MS_Degree 14.73；Hybrid 融合比 Degree 略稳，但没有超过纯 CTQW，说明当前 misleading 生成器仍更适合验证 external seed，而不是证明 CTQW+Degree 融合优于 CTQW。
 
 ### 量子参数调优脚本
 
@@ -471,6 +576,7 @@ from src import (
 )
 from src.algorithms.multi_start_ctqw import (
     MultiStartCTQWGreedy, MultiStartRandomGreedy, MultiStartDegreeGreedy,
+    MultiStartHybridSeedGreedy,
 )
 
 # 加载测试实例
@@ -499,6 +605,10 @@ algorithms = {
     # 大图场景：Multi-Start + Krylov 近似
     "MultiStartCTQW_Krylov": MultiStartCTQWGreedy(
         K=10, t=1.0, evolution_method="krylov", krylov_dim=60),
+    # CTQW + Degree 融合起点选择
+    "MultiStartHybridSeed": MultiStartHybridSeedGreedy(
+        K=10, beta=0.75, t=1.0, evolution_method="chebyshev",
+        cheb_degree=50),
 }
 
 # 运行实验

@@ -28,18 +28,14 @@
   # Part B: 外置方案（DIMACS）
   python3 experiments/exp6_large_scale_approx.py \\
       --mode external --data-source dimacs --K-values 10 20
-
-  # 自定义并行 worker 数
-  python3 experiments/exp6_large_scale_approx.py --mode embedded --workers 3
 """
 
 import argparse
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import re
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -57,7 +53,9 @@ from src.algorithms.classical_greedy import ClassicalGreedy
 from src.algorithms.simulated_annealing import SimulatedAnnealing
 from src.algorithms.quantum_greedy import QuantumGuidedGreedy
 from src.algorithms.multi_start_ctqw import (
-    MultiStartCTQWGreedy, MultiStartRandomGreedy, MultiStartDegreeGreedy)
+    MultiStartCTQWGreedy, MultiStartRandomGreedy, MultiStartDegreeGreedy,
+    MultiStartHybridSeedGreedy, hybrid_seed_scores)
+from src.ctqw_evolution import compute_ctqw_evolution
 from src.metrics import mean_std
 from src.config import get_data_dirs, DATA_DIR, ensure_results_dir
 from src.timeout import run_with_timeout
@@ -68,10 +66,6 @@ from src.timeout import run_with_timeout
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "exp6_large_scale"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
-# 并行控制
-MAX_WORKERS = 5                # 默认并行 worker 数
-SERIAL_N_THRESHOLD = 2000      # n 超过此值自动串行处理该实例，避免 OOM
 
 # 大规模数据运行次数（人工每实例 2 次 = 每组 10 个数据点）
 REPEAT_ARTIFICIAL = 2
@@ -98,10 +92,10 @@ ARTIFICIAL_N_VALUES = {300, 500}
 # 脚本内部会自动拼接为 "ext_mc_{名称}.json" 去匹配 data/external/maximum_clique/ 下的文件。
 # 例如：填写 "C250-9" → 加载 ext_mc_C250-9.json
 DIMACS_WHITELIST = {
-    # "gen200-p0-9-44",   # n=200, |E|≈1.8K
-    # "C250-9",            # n=250, |E|≈2.8K
-    # "p-hat300-3",        # n=300, |E|≈3.3K
-    # "C1000-9",           # n=1000, |E|≈45K
+    "gen200-p0-9-44",   # n=200, |E|≈1.8K
+    "C250-9",            # n=250, |E|≈2.8K
+    "p-hat300-3",        # n=300, |E|≈3.3K
+    "C1000-9",           # n=1000, |E|≈45K
     "C2000-9",           # n=2000, |E|≈180K
 }
 
@@ -116,7 +110,69 @@ COLORS = {
     "MS_Degree":                "#bcbd22",
     "MS_CTQW_krylov_m30":       "#17becf",
     "MS_CTQW_cheb_d50":         "#e377c2",
+    "MS_HybridSeed":            "#4c78a8",
 }
+
+
+class PrecomputedSeedMultiStartGreedy(BaseAlgorithm):
+    """使用预计算 seed 排名的 Multi-Start 贪心。
+
+    external CTQW 在同一图、同一演化方法下的概率排序与 K 无关，
+    所以先算一次完整排名，再为 K=5/10/20/30 截取前 K 个 seed。
+    """
+
+    def __init__(self, seed_order: list[int], K: int,
+                 method_tag: str, name: str | None = None,
+                 beta: float | None = None):
+        super().__init__(
+            CliqueCandidateSet(), ClassicalCliqueScorer(),
+            name=name or f"MS_CTQW(K={K},{method_tag})")
+        self.seed_order = seed_order
+        self.K = K
+        self.method_tag = method_tag
+        self.beta = beta
+
+    def solve(self, instance: GraphInstance):
+        t_start = time.perf_counter()
+        seeds = self.seed_order[:min(self.K, len(self.seed_order))]
+
+        best_solution: list[int] = []
+        best_objective = -1.0
+        per_seed_log: list[dict] = []
+        total_iter = 0
+
+        for v in seeds:
+            inner = ClassicalGreedy(
+                self.candidate_builder, ClassicalCliqueScorer(),
+                name=f"_inner_seed{v}", start_node=v)
+            result = inner.solve(instance)
+            per_seed_log.append({
+                "seed_node": v,
+                "objective": result.objective,
+                "solution_size": len(result.solution),
+                "iterations": result.iterations,
+            })
+            total_iter += result.iterations
+            if result.objective > best_objective:
+                best_objective = result.objective
+                best_solution = result.solution
+
+        runtime = time.perf_counter() - t_start
+        return self._build_result(
+            instance=instance,
+            solution=best_solution,
+            objective=float(best_objective),
+            runtime=runtime,
+            iterations=total_iter,
+            history=per_seed_log,
+            extra_params={
+                "K": self.K,
+                "n_seeds_tried": len(seeds),
+                "ctqw_seed_reused": True,
+                "method_tag": self.method_tag,
+                **({} if self.beta is None else {"beta": self.beta}),
+            },
+        )
 
 
 # ============================================================
@@ -131,10 +187,13 @@ def _extract_n(dirname: str) -> int:
 def discover_instances(
     data_source: str = "artificial",
     smoke: bool = False,
+    limit: int | None = None,
+    dimacs_labels: set[str] | None = None,
 ) -> list[tuple[GraphInstance, str]]:
     """发现大规模测试实例。
 
     artificial: 仅加载 n ∈ {300, 500} 的参数组（由 ARTIFICIAL_N_VALUES 控制）。
+    misleading: 仅加载 degree-misleading 人工最大团样本。
     dimacs:    仅加载 DIMACS_WHITELIST 中指定的数据集。
 
     返回:
@@ -158,6 +217,22 @@ def discover_instances(
                 json_files = json_files[:1]
             for fpath in json_files:
                 instances.append((load_instance(fpath), d.name))
+                if limit is not None and len(instances) >= limit:
+                    return instances
+
+    elif data_source == "misleading":
+        dirs = get_data_dirs("maximum_clique")
+        dirs = [d for d in dirs if d.name.startswith("mc_mislead_")]
+        if smoke:
+            dirs = dirs[:1]
+        for d in dirs:
+            json_files = sorted(d.glob("*.json"))
+            if smoke:
+                json_files = json_files[:1]
+            for fpath in json_files:
+                instances.append((load_instance(fpath), d.name))
+                if limit is not None and len(instances) >= limit:
+                    return instances
 
     elif data_source == "dimacs":
         ext_dir = DATA_DIR / "external" / "maximum_clique"
@@ -169,12 +244,15 @@ def discover_instances(
             inst = load_instance(fpath)
             stem = fpath.stem
             label = stem[7:] if stem.startswith("ext_mc_") else stem
-            if label not in DIMACS_WHITELIST:
+            allowed = dimacs_labels if dimacs_labels is not None else DIMACS_WHITELIST
+            if label not in allowed:
                 continue
             if smoke:
                 instances = [(inst, label)]
                 break
             instances.append((inst, label))
+            if limit is not None and len(instances) >= limit:
+                break
 
     return instances
 
@@ -231,10 +309,13 @@ def build_external_algorithms(
     instance: GraphInstance,
     method_keys: list[str],
     K_values: list[int],
+    hybrid_betas: list[float] | None = None,
     seed: int = 0,
+    reuse_ctqw_seeds: bool = True,
 ) -> dict[str, BaseAlgorithm]:
     """构造 Part B 的算法集合：Multi-Start 系列。"""
     algorithms: dict[str, BaseAlgorithm] = {}
+    hybrid_betas = hybrid_betas or []
 
     # 单起点基线
     algorithms["ClassicalClique"] = ClassicalGreedy(
@@ -247,7 +328,18 @@ def build_external_algorithms(
         algorithms[f"MS_Degree_K{K}"] = MultiStartDegreeGreedy(
             K=K, seed=seed, name=f"MS_Degree(K={K})")
 
-    # MultiStartCTQW × K × 演化方法
+    # MultiStartCTQW × K × 演化方法。默认复用同一方法下的一次 CTQW 排名。
+    seed_orders: dict[str, list[int]] = {}
+    if reuse_ctqw_seeds and K_values:
+        max_k = max(K_values)
+        for key in method_keys:
+            preset = EVOLUTION_PRESETS.get(key)
+            if preset is None:
+                continue
+            if preset["method"] == "exact" and instance.num_nodes > 200:
+                continue
+            seed_orders[key] = compute_ctqw_seed_order(instance, key, max_k)
+
     for K in K_values:
         for key in method_keys:
             preset = EVOLUTION_PRESETS.get(key)
@@ -256,60 +348,128 @@ def build_external_algorithms(
             if preset["method"] == "exact" and instance.num_nodes > 200:
                 continue
 
-            algo = MultiStartCTQWGreedy(
-                K=K, t=FIXED_T, seed=seed,
-                evolution_method=preset["method"],
-                krylov_dim=preset.get("krylov_dim"),
-                cheb_degree=preset.get("cheb_degree"),
-                name=f"MS_CTQW(K={K},{key})",
-            )
+            if key in seed_orders:
+                algo = PrecomputedSeedMultiStartGreedy(
+                    seed_order=seed_orders[key],
+                    K=K,
+                    method_tag=key,
+                    name=f"MS_CTQW(K={K},{key})",
+                )
+            else:
+                algo = MultiStartCTQWGreedy(
+                    K=K, t=FIXED_T, seed=seed,
+                    evolution_method=preset["method"],
+                    krylov_dim=preset.get("krylov_dim"),
+                    cheb_degree=preset.get("cheb_degree"),
+                    name=f"MS_CTQW(K={K},{key})",
+                )
             algorithms[f"MS_CTQW_K{K}_{key}"] = algo
+
+    hybrid_seed_orders: dict[tuple[str, float], list[int]] = {}
+    if reuse_ctqw_seeds and K_values and hybrid_betas:
+        for key in method_keys:
+            preset = EVOLUTION_PRESETS.get(key)
+            if preset is None:
+                continue
+            if preset["method"] == "exact" and instance.num_nodes > 200:
+                continue
+            probs = compute_ctqw_probs(instance, key)
+            degrees = np.asarray(instance.adjacency_sparse.sum(axis=1)).ravel()
+            for beta in hybrid_betas:
+                score = hybrid_seed_scores(probs, degrees, beta)
+                hybrid_seed_orders[(key, beta)] = [
+                    int(v) for v in np.argsort(score)[::-1]
+                ]
+
+    # MS_HybridSeed × K × beta × 演化方法。
+    for K in K_values:
+        for beta in hybrid_betas:
+            for key in method_keys:
+                preset = EVOLUTION_PRESETS.get(key)
+                if preset is None:
+                    continue
+                if preset["method"] == "exact" and instance.num_nodes > 200:
+                    continue
+
+                beta_tag = _format_beta_tag(beta)
+                if (key, beta) in hybrid_seed_orders:
+                    algo = PrecomputedSeedMultiStartGreedy(
+                        seed_order=hybrid_seed_orders[(key, beta)],
+                        K=K,
+                        method_tag=key,
+                        beta=beta,
+                        name=f"MS_HybridSeed(K={K},beta={beta:g},{key})",
+                    )
+                else:
+                    algo = MultiStartHybridSeedGreedy(
+                        K=K, beta=beta, t=FIXED_T, seed=seed,
+                        evolution_method=preset["method"],
+                        krylov_dim=preset.get("krylov_dim"),
+                        cheb_degree=preset.get("cheb_degree"),
+                        name=f"MS_HybridSeed(K={K},beta={beta:g},{key})",
+                    )
+                algorithms[f"MS_HybridSeed_K{K}_b{beta_tag}_{key}"] = algo
 
     return algorithms
 
 
-# ============================================================
-# 单任务执行（模块级函数，供 ProcessPoolExecutor pickle）
-# ============================================================
+def compute_ctqw_seed_order(instance: GraphInstance, method_key: str,
+                            max_k: int | None = None) -> list[int]:
+    """计算 external CTQW 的全图 seed 排名。
 
-def _execute_one_task(
-    algo_template: BaseAlgorithm,
-    algo_name: str,
-    instance: GraphInstance,
-    seed: int,
-    timeout_sec: float,
-    mode: str,
-    source_label: str,
-    run_id: int,
-) -> dict:
-    """单个 (算法, 实例, seed) 组合的执行单元。
-
-    必须是模块级顶层函数（非闭包），否则 spawn 上下文无法 pickle。
-    内部调用 run_with_timeout 隔离子进程，确保超时安全。
+    使用稀疏 CSR 邻接矩阵做矩阵-向量乘法，避免为每个 K 重复演化。
     """
-    algo = _rebuild_with_seed(algo_template, seed, mode)
+    preset = EVOLUTION_PRESETS[method_key]
+    n = instance.num_nodes
+    psi0 = np.ones(n, dtype=np.complex128) / np.sqrt(n)
+    H = instance.adjacency_sparse
+    psi_t = compute_ctqw_evolution(
+        H, psi0, FIXED_T,
+        method=preset["method"],
+        krylov_dim=preset.get("krylov_dim"),
+        cheb_degree=preset.get("cheb_degree"),
+    )
+    probs = np.abs(psi_t) ** 2
+    order = np.argsort(probs)[::-1]
+    if max_k is not None:
+        order = order[:max_k]
+    return [int(v) for v in order]
 
-    t0 = time.perf_counter()
-    result = run_with_timeout(algo, instance, timeout_sec)
-    wall = time.perf_counter() - t0
 
-    row = result.to_dict()
-    row["source_label"] = source_label
-    row["algo_key"] = algo_name
-    row["run_id"] = run_id
-    row["seed"] = seed
-    row["wall_time"] = wall
-    row["n"] = instance.num_nodes
-    row["mode"] = mode
-    row["family"] = _classify_family(algo_name)
-    row["method_tag"] = _extract_ev_tag(algo_name)
-    if mode == "external":
-        row["K"] = _extract_K(algo_name)
-    return row
+def compute_hybrid_seed_order(instance: GraphInstance, method_key: str,
+                              beta: float,
+                              max_k: int | None = None) -> list[int]:
+    """计算 CTQW + Degree 融合 seed 排名。"""
+    probs = compute_ctqw_probs(instance, method_key)
+    degrees = np.asarray(instance.adjacency_sparse.sum(axis=1)).ravel()
+    score = hybrid_seed_scores(probs, degrees, beta)
+    order = np.argsort(score)[::-1]
+    if max_k is not None:
+        order = order[:max_k]
+    return [int(v) for v in order]
+
+
+def compute_ctqw_probs(instance: GraphInstance, method_key: str) -> np.ndarray:
+    """计算 external CTQW 全图概率向量。"""
+    preset = EVOLUTION_PRESETS[method_key]
+    n = instance.num_nodes
+    psi0 = np.ones(n, dtype=np.complex128) / np.sqrt(n)
+    psi_t = compute_ctqw_evolution(
+        instance.adjacency_sparse, psi0, FIXED_T,
+        method=preset["method"],
+        krylov_dim=preset.get("krylov_dim"),
+        cheb_degree=preset.get("cheb_degree"),
+    )
+    return np.abs(psi_t) ** 2
+
+
+def _format_beta_tag(beta: float) -> str:
+    """把 beta 转为稳定的 algo_key 片段。"""
+    return f"{beta:g}".replace(".", "p")
 
 
 # ============================================================
-# 实验运行：串行 / 并行 双模式
+# 实验运行
 # ============================================================
 
 def run_experiment(
@@ -317,73 +477,111 @@ def run_experiment(
     mode: str,
     method_keys: list[str],
     K_values: list[int] | None,
+    hybrid_betas: list[float] | None,
     repeat: int,
     timeout_sec: float,
     smoke: bool,
-    workers: int = MAX_WORKERS,
-    serial_threshold: int = SERIAL_N_THRESHOLD,
+    checkpoint_path: Path | None = None,
+    workers: int = 1,
+    resume: bool = False,
+    retry_timeouts: bool = False,
 ) -> pd.DataFrame:
-    """运行实验并返回汇总 DataFrame。
-
-    烟雾测试或 workers=0 时使用串行模式；否则使用 ProcessPoolExecutor 并行。
-    """
-    if smoke or workers <= 0:
-        return _run_serial(
-            instances, mode, method_keys, K_values,
-            repeat, timeout_sec, smoke)
-    return _run_parallel(
-        instances, mode, method_keys, K_values,
-        repeat, timeout_sec, workers, serial_threshold)
-
-
-def _print_header(mode: str, total_instances: int, n_methods: int,
-                  repeat: int, timeout_sec: float, workers: int,
-                  K_values: list[int] | None, is_parallel: bool):
-    """打印实验配置头部信息。"""
-    print(f"\n{'=' * 60}")
-    print(f"实验六 Part {'A' if mode == 'embedded' else 'B'}: "
-          f"{'嵌入式' if mode == 'embedded' else '外置式'}方案 "
-          f"({'并行 × ' + str(workers) if is_parallel else '串行'})")
-    print(f"  实例数:   {total_instances}")
-    print(f"  方法数:   {n_methods}")
-    print(f"  重复:     {repeat}")
-    print(f"  超时:     {timeout_sec}s")
-    if mode == "external":
-        print(f"  K 值:     {K_values}")
-    print(f"{'=' * 60}")
-
-
-def _run_serial(
-    instances: list[tuple[GraphInstance, str]],
-    mode: str,
-    method_keys: list[str],
-    K_values: list[int] | None,
-    repeat: int,
-    timeout_sec: float,
-    smoke: bool,
-) -> pd.DataFrame:
-    """串行执行：保持原有顺序，每实例逐个算法运行。"""
+    """运行实验并返回汇总 DataFrame。"""
     all_rows: list[dict] = []
     total_instances = len(instances)
     t_start = time.perf_counter()
 
-    _print_header(mode, total_instances, len(method_keys), repeat,
-                  timeout_sec, 0, K_values, is_parallel=False)
+    print(f"\n{'=' * 60}")
+    print(f"实验六 Part {'A' if mode == 'embedded' else 'B'}: "
+          f"{'嵌入式' if mode == 'embedded' else '外置式'}方案")
+    print(f"  实例数:   {total_instances}")
+    print(f"  方法数:   {len(method_keys)}")
+    print(f"  重复:     {repeat}")
+    print(f"  超时:     {timeout_sec}s")
+    print(f"  workers:  {workers}")
+    print(f"  resume:   {resume}")
+    print(f"  retry_to: {retry_timeouts}")
+    if mode == "external":
+        print(f"  K 值:     {K_values}")
+        print(f"  beta 值:  {hybrid_betas or []}")
+    print(f"{'=' * 60}")
+
+    completed_keys: set[tuple[str, str, int]] = set()
+    if resume and checkpoint_path is not None:
+        completed_keys = _load_resume_rows(
+            checkpoint_path, all_rows, retry_timeouts=retry_timeouts)
+        if completed_keys:
+            print(f"  已载入 checkpoint: {len(completed_keys)} 条已完成记录")
+
+    if workers > 1:
+        return _run_experiment_parallel(
+            instances=instances,
+            mode=mode,
+            method_keys=method_keys,
+            K_values=K_values,
+            hybrid_betas=hybrid_betas,
+            repeat=repeat,
+            timeout_sec=timeout_sec,
+            smoke=smoke,
+            checkpoint_path=checkpoint_path,
+            workers=workers,
+            t_start=t_start,
+            initial_rows=all_rows,
+            completed_keys=completed_keys,
+            retry_timeouts=retry_timeouts,
+        )
 
     for idx, (inst, label) in enumerate(instances):
+        n = inst.num_nodes
+        expected_keys = _expected_algo_keys(
+            mode, method_keys, K_values or [5, 10], hybrid_betas or [], inst)
+        expected_tasks = {
+            (inst.sample_id, key, run_id)
+            for run_id in range(1 if smoke else repeat)
+            for key in expected_keys
+        }
+        if expected_tasks and expected_tasks.issubset(completed_keys):
+            continue
+
         if mode == "embedded":
             algos = build_embedded_algorithms(inst, method_keys, seed=0)
         else:
             algos = build_external_algorithms(inst, method_keys,
-                                              K_values or [5, 10], seed=0)
+                                              K_values or [5, 10],
+                                              hybrid_betas=hybrid_betas,
+                                              seed=0)
 
         for run_id in range(1 if smoke else repeat):
             seed = run_id
 
             for algo_name, algo_template in algos.items():
-                row = _execute_one_task(
-                    algo_template, algo_name, inst, seed,
-                    timeout_sec, mode, label, run_id)
+                task_key = (inst.sample_id, algo_name, run_id)
+                if task_key in completed_keys:
+                    continue
+                # 重建算法对象（使用正确的 seed）
+                algo = _rebuild_with_seed(algo_template, seed, mode)
+
+                t0 = time.perf_counter()
+                result = run_with_timeout(algo, inst, timeout_sec)
+                wall = time.perf_counter() - t0
+
+                row = result.to_dict()
+                row["source_label"] = label
+                row["algo_key"] = algo_name
+                row["run_id"] = run_id
+                row["seed"] = seed
+                row["wall_time"] = wall
+                row["n"] = n
+                row["mode"] = mode
+
+                # 解析标签
+                row["family"] = _classify_family(algo_name)
+                if mode == "embedded":
+                    row["method_tag"] = _extract_ev_tag(algo_name)
+                else:
+                    row["method_tag"] = _extract_ev_tag(algo_name)
+                    row["K"] = _extract_K(algo_name)
+
                 all_rows.append(row)
 
         # 进度报告
@@ -395,167 +593,198 @@ def _run_serial(
                   f"耗时 {elapsed:.0f}s, "
                   f"记录 {n_total} 条"
                   + (f", 超时 {n_timeout} 条" if n_timeout > 0 else ""))
+        if checkpoint_path is not None and all_rows:
+            pd.DataFrame(all_rows).to_csv(
+                checkpoint_path, index=False, encoding="utf-8")
 
     df = pd.DataFrame(all_rows)
     elapsed_total = time.perf_counter() - t_start
     print(f"\n全部完成，总耗时 {elapsed_total:.0f}s，共 {len(df)} 条记录")
-    _print_timeout_summary(df)
-    return df
-
-
-def _run_parallel(
-    instances: list[tuple[GraphInstance, str]],
-    mode: str,
-    method_keys: list[str],
-    K_values: list[int] | None,
-    repeat: int,
-    timeout_sec: float,
-    workers: int,
-    serial_threshold: int,
-) -> pd.DataFrame:
-    """并行执行：使用 ProcessPoolExecutor 并发运行任务。
-
-    大图实例（n > serial_threshold）自动降为串行处理，避免多进程
-    同时加载大型邻接矩阵导致 OOM。
-    """
-    all_rows: list[dict] = []
-    total_instances = len(instances)
-    t_start = time.perf_counter()
-
-    _print_header(mode, total_instances, len(method_keys), repeat,
-                  timeout_sec, workers, K_values, is_parallel=True)
-
-    # 分类实例：大图串行 / 小图并行
-    serial_tasks: list[dict] = []
-    parallel_tasks: list[dict] = []
-
-    for inst, label in instances:
-        n = inst.num_nodes
-
-        if mode == "embedded":
-            algos = build_embedded_algorithms(inst, method_keys, seed=0)
-        else:
-            algos = build_external_algorithms(inst, method_keys,
-                                              K_values or [5, 10], seed=0)
-
-        for run_id in range(repeat):
-            seed = run_id
-            for algo_name, algo_template in algos.items():
-                task = dict(
-                    algo_template=algo_template, algo_name=algo_name,
-                    instance=inst, seed=seed, timeout_sec=timeout_sec,
-                    mode=mode, source_label=label, run_id=run_id,
-                )
-                if n > serial_threshold:
-                    serial_tasks.append(task)
-                else:
-                    parallel_tasks.append(task)
-
-    if serial_tasks:
-        big_ns = sorted(set(t["instance"].num_nodes for t in serial_tasks))
-        print(f"  大图串行:   {len(serial_tasks)} 个任务 (n ∈ {big_ns} > {serial_threshold})")
-    if parallel_tasks:
-        print(f"  并行任务:   {len(parallel_tasks)} 个 (workers={workers})")
-
-    n_total = len(serial_tasks) + len(parallel_tasks)
-
-    # ---- 并行阶段 ----
-    if parallel_tasks:
-        ctx = mp.get_context("spawn")
-        # 实际 worker 数不超过任务数
-        actual_workers = min(workers, len(parallel_tasks))
-        with ProcessPoolExecutor(max_workers=actual_workers,
-                                 mp_context=ctx) as executor:
-            futures = {}
-            for task in parallel_tasks:
-                future = executor.submit(
-                    _execute_one_task,
-                    task["algo_template"], task["algo_name"],
-                    task["instance"], task["seed"], task["timeout_sec"],
-                    task["mode"], task["source_label"], task["run_id"],
-                )
-                futures[future] = task
-
-            for future in as_completed(futures):
-                try:
-                    row = future.result()
-                except Exception as exc:
-                    task = futures[future]
-                    row = _make_error_row(
-                        task["algo_name"], task["instance"],
-                        task["seed"], task["timeout_sec"],
-                        task["mode"], task["source_label"],
-                        task["run_id"], exc)
-                all_rows.append(row)
-
-                # 周期进度
-                n_done = len(all_rows)
-                if n_done % max(n_total // 10, 1) == 0 or n_done == len(parallel_tasks) + len(serial_tasks):
-                    elapsed = time.perf_counter() - t_start
-                    n_timeout = sum(1 for r in all_rows if r.get("timed_out"))
-                    print(f"  [{n_done}/{n_total}] 已完成, "
-                          f"耗时 {elapsed:.0f}s"
-                          + (f", 超时 {n_timeout} 条" if n_timeout > 0 else ""))
-
-    # ---- 串行阶段（大图） ----
-    for task in serial_tasks:
-        try:
-            row = _execute_one_task(
-                task["algo_template"], task["algo_name"],
-                task["instance"], task["seed"], task["timeout_sec"],
-                task["mode"], task["source_label"], task["run_id"],
-            )
-        except Exception as exc:
-            row = _make_error_row(
-                task["algo_name"], task["instance"],
-                task["seed"], task["timeout_sec"],
-                task["mode"], task["source_label"],
-                task["run_id"], exc)
-        all_rows.append(row)
-
-    df = pd.DataFrame(all_rows)
-    elapsed_total = time.perf_counter() - t_start
-    print(f"\n全部完成，总耗时 {elapsed_total:.0f}s，共 {len(df)} 条记录")
-    _print_timeout_summary(df)
-    return df
-
-
-def _print_timeout_summary(df: pd.DataFrame):
-    """打印超时统计。"""
     if "timed_out" in df.columns:
         n_to = int(df["timed_out"].sum())
         if n_to > 0:
             print(f"  其中超时: {n_to} / {len(df)} ({n_to / len(df) * 100:.1f}%)")
 
+    return df
 
-def _make_error_row(algo_name: str, instance: GraphInstance, seed: int,
-                    timeout_sec: float, mode: str, source_label: str,
-                    run_id: int, exc: Exception) -> dict:
-    """构造任务级异常（非超时，是进程崩溃）的占位行。"""
-    return {
-        "algorithm": f"{algo_name}[CRASH]",
-        "sample_id": instance.sample_id,
-        "task_type": instance.task_type,
-        "objective": float("nan"),
-        "runtime": 0.0,
-        "iterations": 0,
-        "solution_size": 0,
-        "answer_size": len(instance.answer_set),
-        "recall": 0.0,
-        "timed_out": False,
-        "solution": [],
-        "source_label": source_label,
-        "algo_key": algo_name,
-        "run_id": run_id,
-        "seed": seed,
-        "wall_time": 0.0,
-        "n": instance.num_nodes,
-        "mode": mode,
-        "family": _classify_family(algo_name),
-        "method_tag": _extract_ev_tag(algo_name),
-        "K": _extract_K(algo_name) if mode == "external" else 0,
-        "error": f"{type(exc).__name__}: {exc}",
-    }
+
+def _expected_algo_keys(mode: str, method_keys: list[str],
+                        K_values: list[int], hybrid_betas: list[float],
+                        instance: GraphInstance) -> list[str]:
+    """无需构造算法即可得到预期 algo_key 列表，用于 resume 快速跳过。"""
+    if mode == "embedded":
+        keys = ["ClassicalDegree", "ClassicalClique", "SimulatedAnnealing"]
+        for key in method_keys:
+            preset = EVOLUTION_PRESETS.get(key)
+            if preset is None:
+                continue
+            if preset["method"] == "exact" and instance.num_nodes > 200:
+                continue
+            keys.append(f"QuantumGreedy_{key}")
+        return keys
+
+    keys = ["ClassicalClique"]
+    for K in K_values:
+        keys.extend([f"MS_Random_K{K}", f"MS_Degree_K{K}"])
+        for key in method_keys:
+            preset = EVOLUTION_PRESETS.get(key)
+            if preset is None:
+                continue
+            if preset["method"] == "exact" and instance.num_nodes > 200:
+                continue
+            keys.append(f"MS_CTQW_K{K}_{key}")
+        for beta in hybrid_betas:
+            beta_tag = _format_beta_tag(beta)
+            for key in method_keys:
+                preset = EVOLUTION_PRESETS.get(key)
+                if preset is None:
+                    continue
+                if preset["method"] == "exact" and instance.num_nodes > 200:
+                    continue
+                keys.append(f"MS_HybridSeed_K{K}_b{beta_tag}_{key}")
+    return keys
+
+
+def _task_key_from_row(row: pd.Series | dict) -> tuple[str, str, int] | None:
+    try:
+        return (str(row["sample_id"]), str(row["algo_key"]), int(row["run_id"]))
+    except Exception:
+        return None
+
+
+def _load_resume_rows(checkpoint_path: Path,
+                      rows_out: list[dict],
+                      retry_timeouts: bool = False) -> set[tuple[str, str, int]]:
+    """加载已有 full/partial CSV，并返回已完成任务键。"""
+    candidates = [checkpoint_path.with_name("full_results.csv"), checkpoint_path]
+    for path in candidates:
+        if not path.exists():
+            continue
+        old = pd.read_csv(path)
+        if old.empty:
+            continue
+        if retry_timeouts and "timed_out" in old.columns:
+            timed_out = old["timed_out"].astype(str).str.lower().eq("true")
+            kept = old[~timed_out].copy()
+        else:
+            kept = old
+        rows_out.extend(kept.to_dict("records"))
+        keys = set()
+        for _, row in kept.iterrows():
+            key = _task_key_from_row(row)
+            if key is not None:
+                keys.add(key)
+        return keys
+    return set()
+
+
+def _run_experiment_parallel(
+    instances: list[tuple[GraphInstance, str]],
+    mode: str,
+    method_keys: list[str],
+    K_values: list[int] | None,
+    hybrid_betas: list[float] | None,
+    repeat: int,
+    timeout_sec: float,
+    smoke: bool,
+    checkpoint_path: Path | None,
+    workers: int,
+    t_start: float,
+    initial_rows: list[dict] | None = None,
+    completed_keys: set[tuple[str, str, int]] | None = None,
+    retry_timeouts: bool = False,
+) -> pd.DataFrame:
+    """并行运行实验。
+
+    外层使用线程池调度 solve 任务；每个任务内部仍调用 run_with_timeout，
+    由独立子进程隔离求解和超时。这样避免 Windows 下嵌套进程池的复杂性。
+    """
+    completed_keys = completed_keys or set()
+    tasks = []
+    for idx, (inst, label) in enumerate(instances):
+        expected_keys = _expected_algo_keys(
+            mode, method_keys, K_values or [5, 10], hybrid_betas or [], inst)
+        expected_tasks = {
+            (inst.sample_id, key, run_id)
+            for run_id in range(1 if smoke else repeat)
+            for key in expected_keys
+        }
+        if expected_tasks and expected_tasks.issubset(completed_keys):
+            continue
+
+        if mode == "embedded":
+            algos = build_embedded_algorithms(inst, method_keys, seed=0)
+        else:
+            algos = build_external_algorithms(inst, method_keys,
+                                              K_values or [5, 10],
+                                              hybrid_betas=hybrid_betas,
+                                              seed=0)
+
+        for run_id in range(1 if smoke else repeat):
+            for algo_name, algo_template in algos.items():
+                task_key = (inst.sample_id, algo_name, run_id)
+                if task_key in completed_keys:
+                    continue
+                tasks.append((idx, inst, label, algo_name, algo_template, run_id))
+
+    total_tasks = len(tasks)
+    all_rows: list[dict] = list(initial_rows or [])
+    if total_tasks == 0:
+        print("  所有任务均已完成，直接使用已有结果。")
+        return pd.DataFrame(all_rows)
+    completed_instances: set[int] = set()
+    report_every = max(total_tasks // 10, 1)
+
+    def _solve_task(task):
+        idx, inst, label, algo_name, algo_template, run_id = task
+        seed = run_id
+        algo = _rebuild_with_seed(algo_template, seed, mode)
+
+        t0 = time.perf_counter()
+        result = run_with_timeout(algo, inst, timeout_sec)
+        wall = time.perf_counter() - t0
+
+        row = result.to_dict()
+        row["source_label"] = label
+        row["algo_key"] = algo_name
+        row["run_id"] = run_id
+        row["seed"] = seed
+        row["wall_time"] = wall
+        row["n"] = inst.num_nodes
+        row["mode"] = mode
+        row["family"] = _classify_family(algo_name)
+        row["method_tag"] = _extract_ev_tag(algo_name)
+        if mode == "external":
+            row["K"] = _extract_K(algo_name)
+        return idx, row
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(_solve_task, task): task for task in tasks}
+        for done_idx, future in enumerate(as_completed(future_map), 1):
+            idx, row = future.result()
+            all_rows.append(row)
+            completed_instances.add(idx)
+
+            if checkpoint_path is not None:
+                pd.DataFrame(all_rows).to_csv(
+                    checkpoint_path, index=False, encoding="utf-8")
+
+            if done_idx % report_every == 0 or done_idx == total_tasks:
+                elapsed = time.perf_counter() - t_start
+                n_timeout = sum(1 for r in all_rows if r.get("timed_out"))
+                print(f"  [{done_idx:4d}/{total_tasks}] task 完成, "
+                      f"实例 {len(completed_instances)}/{len(instances)}, "
+                      f"耗时 {elapsed:.0f}s, 记录 {len(all_rows)} 条"
+                      + (f", 超时 {n_timeout} 条" if n_timeout > 0 else ""))
+
+    df = pd.DataFrame(all_rows)
+    elapsed_total = time.perf_counter() - t_start
+    print(f"\n全部完成，总耗时 {elapsed_total:.0f}s，共 {len(df)} 条记录")
+    if "timed_out" in df.columns:
+        n_to = int(df["timed_out"].sum())
+        if n_to > 0:
+            print(f"  其中超时: {n_to} / {len(df)} ({n_to / len(df) * 100:.1f}%)")
+    return df
 
 
 def _rebuild_with_seed(template: BaseAlgorithm, seed: int,
@@ -590,11 +819,26 @@ def _rebuild_with_seed(template: BaseAlgorithm, seed: int,
             krylov_dim=template.krylov_dim,
             cheb_degree=template.cheb_degree, name=name)
 
+    elif isinstance(template, MultiStartHybridSeedGreedy):
+        return MultiStartHybridSeedGreedy(
+            K=template.K, beta=template.beta, t=template.t, seed=seed,
+            evolution_method=template.evolution_method,
+            krylov_dim=template.krylov_dim,
+            cheb_degree=template.cheb_degree, name=name)
+
     elif isinstance(template, MultiStartRandomGreedy):
         return MultiStartRandomGreedy(K=template.K, seed=seed, name=name)
 
     elif isinstance(template, MultiStartDegreeGreedy):
         return MultiStartDegreeGreedy(K=template.K, seed=seed, name=name)
+
+    elif isinstance(template, PrecomputedSeedMultiStartGreedy):
+        return PrecomputedSeedMultiStartGreedy(
+            seed_order=template.seed_order,
+            K=template.K,
+            method_tag=template.method_tag,
+            beta=template.beta,
+            name=name)
 
     return template
 
@@ -605,7 +849,8 @@ def _rebuild_with_seed(template: BaseAlgorithm, seed: int,
 
 def _classify_family(algo_name: str) -> str:
     for fam in ["ClassicalDegree", "ClassicalClique", "SimulatedAnnealing",
-                 "QuantumGreedy", "MS_Random", "MS_Degree", "MS_CTQW"]:
+                 "QuantumGreedy", "MS_Random", "MS_Degree", "MS_CTQW",
+                 "MS_HybridSeed"]:
         if algo_name.startswith(fam):
             return fam
     return algo_name.split("(")[0] if "(" in algo_name else algo_name[:20]
@@ -632,11 +877,18 @@ def _display_name(row: pd.Series) -> str:
     """构造区分方法的显示名。
 
     量子变体按演化方法区分（krylov_m30 / cheb_d50 各自独立显示），
-    经典基线保持不变。仅当 method_tag 是有效字符串时才附加到显示名。
+    经典基线保持不变。
     """
-    fam = row.get("family", "Unknown")
-    tag = row.get("method_tag", None)
-    if isinstance(tag, str) and tag != "N/A":
+    fam = row["family"]
+    tag = row.get("method_tag", "N/A")
+    if fam == "MS_HybridSeed":
+        beta = row.get("beta", None)
+        beta_part = "bNA" if pd.isna(beta) else f"b{float(beta):g}"
+        if pd.notna(tag) and tag and tag != "N/A":
+            return f"{fam}_{beta_part}_{tag}"
+        return f"{fam}_{beta_part}"
+    if pd.notna(tag) and tag and tag != "N/A":
+        # 简短标签：QG_krylov_m30, MS_CTQW_cheb_d50 等
         return f"{fam}_{tag}"
     return fam
 
@@ -648,19 +900,22 @@ def _short_label(display: str) -> str:
         .replace("ClassicalDegree", "DegGreedy") \
         .replace("ClassicalClique", "CliqueGreedy") \
         .replace("SimulatedAnnealing", "SimAnneal") \
+        .replace("MS_HybridSeed", "Hybrid") \
         .replace("MS_", "")
 
 
-def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
+def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str,
+                     output_dir: Path | None = None):
     """分析实验结果并生成图表和 CSV。"""
     if df.empty:
         print("DataFrame 为空，跳过分析。")
         return
 
-    out = RESULTS_DIR / f"exp6_{mode}_{tag}"
+    out = output_dir if output_dir is not None else RESULTS_DIR / f"exp6_{mode}_{tag}"
     out.mkdir(parents=True, exist_ok=True)
 
-    # 添加 display_name 列（原始 df 和有效子集都需要）
+    # 过滤有效结果，并添加 display_name 列
+    df = df.copy()
     df["display_name"] = df.apply(_display_name, axis=1)
     df_valid = df[df.get("timed_out", pd.Series(False, index=df.index)) == False].copy()
 
@@ -687,6 +942,7 @@ def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
 
     # ---- 保存完整结果 ----
     df.to_csv(out / "full_results.csv", index=False, encoding="utf-8")
+    _write_summary_tables(df, out, mode)
 
     # ---- 箱线图 ----
     if mode == "embedded":
@@ -696,6 +952,123 @@ def analyze_and_plot(df: pd.DataFrame, mode: str, tag: str):
         _plot_external_heatmap(df_valid, out)
 
     print(f"\n结果目录: {out}")
+
+
+def _write_summary_tables(df: pd.DataFrame, out: Path, mode: str) -> None:
+    """写出报告友好的统计表。"""
+    df = df.copy()
+    if "display_name" not in df.columns:
+        df["display_name"] = df.apply(_display_name, axis=1)
+    if "timed_out" not in df.columns:
+        df["timed_out"] = False
+    df["timed_out_bool"] = df["timed_out"].astype(str).str.lower().eq("true")
+    df["valid_objective"] = pd.to_numeric(df["objective"], errors="coerce")
+
+    method_summary = (
+        df.groupby(["mode", "family", "display_name"], dropna=False)
+        .agg(
+            runs=("sample_id", "size"),
+            samples=("sample_id", "nunique"),
+            mean_objective=("valid_objective", "mean"),
+            median_objective=("valid_objective", "median"),
+            std_objective=("valid_objective", "std"),
+            median_wall_time=("wall_time", "median"),
+            p95_wall_time=("wall_time", lambda s: s.quantile(0.95)),
+            timeout_rate=("timed_out_bool", "mean"),
+        )
+        .reset_index()
+        .sort_values(["mean_objective", "median_wall_time"], ascending=[False, True])
+    )
+    method_summary.to_csv(out / "summary_by_method.csv", index=False,
+                          encoding="utf-8")
+
+    group_cols = ["source_label", "n", "display_name"]
+    if mode == "external" and "K" in df.columns:
+        group_cols.insert(2, "K")
+    by_source = (
+        df.groupby(group_cols, dropna=False)
+        .agg(
+            runs=("sample_id", "size"),
+            mean_objective=("valid_objective", "mean"),
+            max_objective=("valid_objective", "max"),
+            median_wall_time=("wall_time", "median"),
+            p95_wall_time=("wall_time", lambda s: s.quantile(0.95)),
+            timeout_rate=("timed_out_bool", "mean"),
+        )
+        .reset_index()
+        .sort_values(group_cols)
+    )
+    by_source.to_csv(out / "summary_by_source.csv", index=False,
+                     encoding="utf-8")
+
+    paired = _paired_difference_table(df, mode)
+    if not paired.empty:
+        paired.to_csv(out / "paired_differences.csv", index=False,
+                      encoding="utf-8")
+    print(f"  汇总表: {out / 'summary_by_method.csv'}")
+    print(f"  分组表: {out / 'summary_by_source.csv'}")
+    if not paired.empty:
+        print(f"  配对差异表: {out / 'paired_differences.csv'}")
+
+
+def _paired_difference_table(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """生成配对差异表。embedded 对 ClassicalClique，external 对同 K 的 MS_Degree。"""
+    rows = []
+    valid = df.copy()
+    valid["objective"] = pd.to_numeric(valid["objective"], errors="coerce")
+    valid = valid.dropna(subset=["objective"])
+    if valid.empty:
+        return pd.DataFrame()
+
+    if mode == "embedded":
+        baseline_name = "ClassicalClique"
+        valid["_pair_key"] = list(zip(valid["sample_id"], valid["run_id"]))
+        base = valid[valid["display_name"].eq(baseline_name)]
+        base_lookup = dict(zip(base["_pair_key"], base["objective"]))
+        for name in sorted(valid["display_name"].unique()):
+            if name == baseline_name:
+                continue
+            sub = valid[valid["display_name"].eq(name)]
+            diffs = [
+                float(r["objective"] - base_lookup[key])
+                for _, r in sub.iterrows()
+                for key in [r["_pair_key"]]
+                if key in base_lookup
+            ]
+            if diffs:
+                rows.append(_diff_stats(name, baseline_name, diffs))
+    else:
+        valid["_pair_key"] = list(zip(valid["sample_id"], valid["run_id"], valid.get("K", 0)))
+        base = valid[valid["family"].eq("MS_Degree")]
+        base_lookup = dict(zip(base["_pair_key"], base["objective"]))
+        for name in sorted(valid["display_name"].unique()):
+            if name == "MS_Degree":
+                continue
+            sub = valid[valid["display_name"].eq(name)]
+            diffs = [
+                float(r["objective"] - base_lookup[key])
+                for _, r in sub.iterrows()
+                for key in [r["_pair_key"]]
+                if key in base_lookup
+            ]
+            if diffs:
+                rows.append(_diff_stats(name, "MS_Degree(same K)", diffs))
+    return pd.DataFrame(rows)
+
+
+def _diff_stats(name: str, baseline: str, diffs: list[float]) -> dict:
+    arr = np.asarray(diffs, dtype=float)
+    return {
+        "method": name,
+        "baseline": baseline,
+        "n_pairs": len(arr),
+        "mean_diff": float(arr.mean()),
+        "median_diff": float(np.median(arr)),
+        "wins": int((arr > 0).sum()),
+        "ties": int((arr == 0).sum()),
+        "losses": int((arr < 0).sum()),
+        "win_rate": float((arr > 0).mean()),
+    }
 
 
 def _plot_embedded_boxplots(df: pd.DataFrame, out: Path):
@@ -735,6 +1108,9 @@ def _plot_embedded_boxplots(df: pd.DataFrame, out: Path):
 def _plot_external_boxplots(df: pd.DataFrame, out: Path):
     """Part B 箱线图：按 K 分组，MS_CTQW 的两种方法各自独立显示。"""
     Ks = sorted([k for k in df["K"].unique() if k > 0])
+    if not Ks:
+        print("  跳过 external 箱线图：没有有效的 Multi-Start K 结果")
+        return
 
     fig, axes = plt.subplots(1, len(Ks), figsize=(5 * len(Ks), 5),
                              squeeze=False)
@@ -751,14 +1127,15 @@ def _plot_external_boxplots(df: pd.DataFrame, out: Path):
         if not sub[sub["family"] == "MS_Degree"].empty:
             groups.append(("MS_Degree", "Degree"))
 
-        # MS_CTQW 按 display_name 拆分
+        # MS_CTQW / MS_HybridSeed 按 display_name 拆分
         ms_ctqw_names = sorted([
             d for d in sub["display_name"].unique()
-            if d.startswith("MS_CTQW")
+            if d.startswith("MS_CTQW") or d.startswith("MS_HybridSeed")
         ])
         for dname in ms_ctqw_names:
             # 从 display_name 提取简短标签
             label = dname.replace("MS_CTQW_", "CTQW_")
+            label = label.replace("MS_HybridSeed_", "Hybrid_")
             groups.append((dname, label))
 
         data_list = []
@@ -805,8 +1182,14 @@ def _plot_external_heatmap(df: pd.DataFrame, out: Path):
     """Part B 热力图：K × display_name 的团大小均值。
 
     MS_CTQW 按演化方法拆分多行，MS_Random / MS_Degree 各占一行。
+    MS_HybridSeed 按 beta 和演化方法拆分多行。
     """
-    ms_data = df[df["family"].isin(["MS_Random", "MS_Degree", "MS_CTQW"])]
+    ms_data = df[df["family"].isin([
+        "MS_Random", "MS_Degree", "MS_CTQW", "MS_HybridSeed"
+    ])]
+    if ms_data.empty:
+        print("  跳过 external 热力图：没有有效的 Multi-Start 结果")
+        return
     # 用 display_name 替代 family，使 MS_CTQW 的两种方法各自成行
     agg = ms_data.groupby(["display_name", "K"])["objective"].mean().reset_index()
     pivot = agg.pivot(index="display_name", columns="K", values="objective")
@@ -814,10 +1197,13 @@ def _plot_external_heatmap(df: pd.DataFrame, out: Path):
     if pivot.empty:
         return
 
-    # 重新排列行：MS_Random → MS_Degree → MS_CTQW 的两个变体
+    # 重新排列行：MS_Random → MS_Degree → MS_CTQW → MS_HybridSeed
     row_order = ["MS_Random", "MS_Degree"]
     for dname in sorted(pivot.index):
         if dname.startswith("MS_CTQW"):
+            row_order.append(dname)
+    for dname in sorted(pivot.index):
+        if dname.startswith("MS_HybridSeed"):
             row_order.append(dname)
     pivot = pivot.reindex([r for r in row_order if r in pivot.index])
 
@@ -863,8 +1249,8 @@ def main():
                         help="烟雾测试：1 实例 + 1 次重复")
 
     parser.add_argument("--data-source", default="artificial",
-                        choices=["artificial", "dimacs"],
-                        help="数据来源（人工 n=300,500 / DIMACS 5 个指定数据集）")
+                        choices=["artificial", "misleading", "dimacs"],
+                        help="数据来源（人工 n=300,500 / misleading / DIMACS 5 个指定数据集）")
 
     parser.add_argument("--methods", nargs="+",
                         default=["krylov_m30", "cheb_d50"],
@@ -873,20 +1259,27 @@ def main():
     parser.add_argument("--K-values", nargs="+", type=int,
                         default=[5, 10, 20, 30],
                         help="Multi-Start 起点数 K（仅 external 模式）")
+    parser.add_argument("--hybrid-betas", nargs="+", type=float,
+                        default=[],
+                        help="启用 MS_HybridSeed 的 beta 列表，如 0.25 0.5 0.75")
 
     parser.add_argument("--timeout", type=float, default=300,
                         help="单次 solve 超时门限（秒），默认 300")
     parser.add_argument("--repeat", type=int, default=None,
                         help="每实例重复次数（默认: artificial=2, dimacs=3）")
 
-    parser.add_argument("--workers", type=int, default=MAX_WORKERS,
-                        help=f"并行 worker 数（默认 {MAX_WORKERS}，0=回退串行）")
-    parser.add_argument("--serial-threshold", type=int,
-                        default=SERIAL_N_THRESHOLD,
-                        help=f"n 超过此值的大图实例改为串行处理（默认 {SERIAL_N_THRESHOLD}）")
-
     parser.add_argument("--no-plot", action="store_true", help="跳过绘图")
     parser.add_argument("--output", type=str, default=None, help="输出目录")
+    parser.add_argument("--limit-instances", type=int, default=None,
+                        help="最多运行多少个实例；用于分批跑大规模实验")
+    parser.add_argument("--dimacs-labels", nargs="+", default=None,
+                        help="仅运行指定 DIMACS label，如 C250-9 p-hat300-3")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="并行 solve 数量；建议大图从 2 开始")
+    parser.add_argument("--resume", action="store_true",
+                        help="从 full_results.csv 或 full_results.partial.csv 跳过已完成任务")
+    parser.add_argument("--retry-timeouts", action="store_true",
+                        help="配合 --resume 使用：丢弃旧超时记录并重跑这些任务")
 
     args = parser.parse_args()
 
@@ -902,7 +1295,10 @@ def main():
         repeat = REPEAT_ARTIFICIAL
 
     # 发现实例
-    instances = discover_instances(args.data_source, smoke=args.smoke)
+    instances = discover_instances(args.data_source, smoke=args.smoke,
+                                   limit=args.limit_instances,
+                                   dimacs_labels=(set(args.dimacs_labels)
+                                                  if args.dimacs_labels else None))
     if not instances:
         print("未找到任何测试实例，退出。")
         return
@@ -911,31 +1307,30 @@ def main():
     ns = sorted(set(inst.num_nodes for inst, _ in instances))
 
     print(f"\n实验六：大规模图 CTQW 近似方法对比")
-    print(f"  模式:         {args.mode}")
-    print(f"  数据来源:     {args.data_source}")
-    print(f"  节点范围:     n ∈ {ns}")
-    print(f"  实例数:       {len(instances)}")
-    print(f"  方法:         {args.methods}")
-    print(f"  重复:         {repeat} 次/实例")
-    print(f"  超时:         {timeout_sec}s")
-    print(f"  并行 worker:  {args.workers if args.workers > 0 else '串行'}"
-          + (f" (大图阈值 n>{args.serial_threshold})" if args.workers > 0 else ""))
+    print(f"  模式:       {args.mode}")
+    print(f"  数据来源:   {args.data_source}")
+    print(f"  节点范围:   n ∈ {ns}")
+    print(f"  实例数:     {len(instances)}")
+    print(f"  方法:       {args.methods}")
+    print(f"  重复:       {repeat} 次/实例")
+    print(f"  超时:       {timeout_sec}s")
+    print(f"  workers:    {args.workers}")
     if args.mode == "external":
-        print(f"  K 值:         {args.K_values}")
+        print(f"  K 值:       {args.K_values}")
+        print(f"  beta 值:    {args.hybrid_betas}")
 
-    # 运行实验
-    df = run_experiment(
-        instances, args.mode, args.methods, args.K_values,
-        repeat, timeout_sec, args.smoke,
-        workers=args.workers,
-        serial_threshold=args.serial_threshold)
-
-    if df.empty:
-        print("未收集到数据，退出。")
-        return
-
-    # 输出
-    data_tag = "dimacs" if args.data_source == "dimacs" else f"n{min(ns)}-{max(ns)}"
+    # 输出目录先创建，用作长任务 checkpoint。
+    if args.data_source == "dimacs":
+        data_tag = "dimacs"
+    elif args.data_source == "misleading":
+        data_tag = f"misleading_n{min(ns)}-{max(ns)}"
+    else:
+        data_tag = f"n{min(ns)}-{max(ns)}"
+    if args.limit_instances is not None:
+        data_tag = f"{data_tag}_first{args.limit_instances}"
+    if args.dimacs_labels:
+        safe_labels = "-".join(label.replace("/", "_") for label in args.dimacs_labels)
+        data_tag = f"{data_tag}_{safe_labels}"
     tag = f"{data_tag}{'_smoke' if args.smoke else ''}"
 
     if args.output:
@@ -943,12 +1338,26 @@ def main():
     else:
         out = RESULTS_DIR / f"exp6_{args.mode}_{tag}"
     out.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = out / "full_results.partial.csv"
+
+    # 运行实验
+    df = run_experiment(
+        instances, args.mode, args.methods, args.K_values, args.hybrid_betas,
+        repeat, timeout_sec, args.smoke,
+        checkpoint_path=checkpoint_path,
+        workers=max(1, args.workers),
+        resume=args.resume,
+        retry_timeouts=args.retry_timeouts)
+
+    if df.empty:
+        print("未收集到数据，退出。")
+        return
 
     df.to_csv(out / "full_results.csv", index=False, encoding="utf-8")
     print(f"\n完整结果已保存: {out / 'full_results.csv'}")
 
     if not args.no_plot:
-        analyze_and_plot(df, args.mode, tag)
+        analyze_and_plot(df, args.mode, tag, output_dir=out)
 
     print(f"\n实验六完成。")
 

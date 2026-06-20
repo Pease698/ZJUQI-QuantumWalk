@@ -125,6 +125,8 @@ def run_ablation_on_instance(instance, algorithms: dict,
             result = algo.solve(instance)
             row = result.to_dict()
             row["run_id"] = run_id
+            row["seed"] = run_id
+            row["n"] = instance.num_nodes
             row["ablation_group"] = algo_name[0]  # A/B/C/D
             rows.append(row)
     return rows
@@ -156,14 +158,19 @@ def _rebuild_ablation_algo(template, seed: int):
 # 批量实验与可视化
 # ============================================================
 
-def run_ablation_experiment(task_type: str, small: bool = True) -> pd.DataFrame:
+def run_ablation_experiment(task_type: str, small: bool = True,
+                            max_n: int | None = None,
+                            repeat: int = REPEAT_RUNS) -> pd.DataFrame:
     """批量运行消融实验。"""
-    dirs = get_data_dirs(task_type)
+    dirs = [d for d in get_data_dirs(task_type) if "artificial" in d.parts]
     if not dirs:
         print(f"未找到 {task_type} 的数据目录")
         return pd.DataFrame()
 
-    if small:
+    if max_n is not None:
+        dirs = [d for d in dirs if _extract_n(d.name) <= max_n]
+        print(f"n≤{max_n} 模式：筛选 {len(dirs)} 个目录")
+    elif small:
         dirs = [d for d in dirs if _extract_n(d.name) <= 50]
         print(f"小规模模式：筛选 {len(dirs)} 个目录 (n ≤ 50)")
 
@@ -175,6 +182,7 @@ def run_ablation_experiment(task_type: str, small: bool = True) -> pd.DataFrame:
     print(f"  任务类型: {task_type}")
     print(f"  目标: 验证 Q / R / λ 各自对性能的贡献")
     print(f"  数据目录: {total_dirs} 个")
+    print(f"  每实例重复: {repeat} 次")
     print("-" * 50)
 
     for dir_idx, data_dir in enumerate(dirs):
@@ -182,7 +190,9 @@ def run_ablation_experiment(task_type: str, small: bool = True) -> pd.DataFrame:
         algo_templates = build_ablation_algorithms(task_type, seed=0)
 
         for inst in instances:
-            rows = run_ablation_on_instance(inst, algo_templates, REPEAT_RUNS)
+            rows = run_ablation_on_instance(inst, algo_templates, repeat)
+            for row in rows:
+                row["source_label"] = data_dir.name
             all_rows.extend(rows)
 
         elapsed = time.perf_counter() - t_start
@@ -194,7 +204,7 @@ def run_ablation_experiment(task_type: str, small: bool = True) -> pd.DataFrame:
     elapsed_total = time.perf_counter() - t_start
     print(f"\n全部完成，总耗时 {elapsed_total:.0f}s")
 
-    suffix = "small" if small else "full"
+    suffix = _result_tag(small, max_n, repeat)
     csv_path = RESULTS_DIR / f"{task_type}_{suffix}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8")
     print(f"结果已保存至: {csv_path}")
@@ -365,6 +375,30 @@ def analyze_ablation(df: pd.DataFrame, task_type: str, tag: str = "small"):
     summary_df.to_csv(summary_path, index=False, encoding="utf-8")
     print(f"汇总统计已保存至: {summary_path}")
 
+    df2 = df.copy()
+    df2["ablation_base"] = df2["algorithm"].apply(_base_name)
+    if "source_label" in df2.columns:
+        if "n" in df2.columns:
+            df2["n_group"] = "n=" + df2["n"].astype(int).astype(str)
+        else:
+            df2["n_group"] = df2["sample_id"].apply(
+                lambda s: f"n={s.split('_')[1]}" if "_" in s else s)
+        source_summary = (
+            df2.groupby(["source_label", "n_group", "ablation_base"], dropna=False)
+            .agg(
+                objective_mean=("objective", "mean"),
+                objective_std=("objective", "std"),
+                runtime_median=("runtime", "median"),
+                runtime_p95=("runtime", lambda s: s.quantile(0.95)),
+                n_runs=("objective", "size"),
+            )
+            .reset_index()
+            .sort_values(["n_group", "source_label", "ablation_base"])
+        )
+        source_path = RESULTS_DIR / f"{task_type}_{tag}_by_source.csv"
+        source_summary.to_csv(source_path, index=False, encoding="utf-8")
+        print(f"按参数组汇总已保存至: {source_path}")
+
 
 def _extract_n(dirname: str) -> int:
     import re
@@ -380,6 +414,16 @@ def _base_name(full_name: str) -> str:
     return full_name
 
 
+def _result_tag(small: bool, max_n: int | None, repeat: int) -> str:
+    if max_n is not None:
+        tag = f"nle{max_n}"
+    else:
+        tag = "small" if small else "full"
+    if repeat != REPEAT_RUNS:
+        tag = f"{tag}_r{repeat}"
+    return tag
+
+
 # ============================================================
 # 入口
 # ============================================================
@@ -393,11 +437,17 @@ def main():
                         help="仅使用小规模实例（默认）")
     parser.add_argument("--full", action="store_true", default=False,
                         help="使用全部数据集")
+    parser.add_argument("--max-n", type=int, default=None,
+                        help="仅使用 n≤max_n 的实例；比 --small/--full 更细粒度")
+    parser.add_argument("--repeat", type=int, default=REPEAT_RUNS,
+                        help="每个实例重复次数")
     parser.add_argument("--csv", type=str, default=None,
                         help="直接分析已有 CSV")
     args = parser.parse_args()
 
     if args.full:
+        args.small = False
+    if args.max_n is not None:
         args.small = False
 
     if args.csv:
@@ -407,11 +457,17 @@ def main():
         return
 
     print(f"实验三：消融实验（{args.task}）")
-    print(f"  模式: {'小规模 (n≤50)' if args.small else '全部数据集'}")
+    if args.max_n is not None:
+        print(f"  模式: n≤{args.max_n}")
+    else:
+        print(f"  模式: {'小规模 (n≤50)' if args.small else '全部数据集'}")
+    print(f"  每实例重复: {args.repeat}")
 
-    df = run_ablation_experiment(args.task, small=args.small)
+    df = run_ablation_experiment(args.task, small=args.small,
+                                 max_n=args.max_n,
+                                 repeat=args.repeat)
     if not df.empty:
-        tag = "small" if args.small else "full"
+        tag = _result_tag(args.small, args.max_n, args.repeat)
         analyze_ablation(df, args.task, tag)
 
     print(f"\n实验三完成。")
