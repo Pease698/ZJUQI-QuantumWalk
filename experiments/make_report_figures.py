@@ -40,7 +40,6 @@ PANELS = [
 
 def load_means(subdir):
     df = pd.read_csv(os.path.join(BASE, subdir, "full_results.csv"))
-    df = df[df["sample_id"] != "ext_mc_C1000-9"]
     g = df.groupby("display_name")["objective"].mean()
     return g
 

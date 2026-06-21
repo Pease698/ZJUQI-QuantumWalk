@@ -522,6 +522,58 @@ def ctqw_seeds(adj, K, t=1.0,
     return np.argsort(probs)[-K:][::-1]
 \end{verbatim}
 
+\newpage
+\section{代码清单}
+
+本项目核心代码位于 \texttt{src/} 目录，实验脚本位于 \texttt{experiments/} 目录。下表列出关键模块及功能说明。
+
+\begin{table}[H]
+\caption{核心代码模块清单}
+\label{tbl:code_index}
+\centering
+\begin{tabular}{lp{4.2cm}}
+\hline\hline
+\textbf{文件} & \textbf{功能} \\
+\hline
+\multicolumn{2}{c}{\textit{src/ 算法核心库}} \\
+\hline
+\texttt{hamiltonian.py}     & 哈密顿量构造 $H=A+\lambda\sum\ket{u}\bra{u}$ \\
+\texttt{initial\_state.py}  & 初态构造（均匀/最大度/随机） \\
+\texttt{ctqw\_evolution.py} & CTQW 演化（exact / Krylov / Chebyshev） \\
+\texttt{scoring.py}         & 三类评分（经典/量子/混合融合） \\
+\texttt{candidate\_set.py}   & 候选集合构造 $C(S)$ \\
+\texttt{config.py}          & 全局配置管理 \\
+\texttt{graph\_utils.py}     & 图加载与邻接矩阵构建 \\
+\texttt{runner.py}          & 实验运行器 \\
+\texttt{metrics.py}         & 评价指标（recall、Wilcoxon 等） \\
+\texttt{timeout.py}         & 超时控制（exp6 多进程隔离） \\
+\texttt{algorithms/}        & 算法实现目录 \\
+\quad\texttt{base.py}             & 算法基类 + 结果数据结构 \\
+\quad\texttt{classical\_greedy.py} & 经典贪心（支持种子注入） \\
+\quad\texttt{quantum\_greedy.py}   & 嵌入式量子引导贪心 \\
+\quad\texttt{multi\_start\_ctqw.py}& 外置式 MultiStart 系列 \\
+\quad\texttt{simulated\_annealing.py} & 模拟退火基线 \\
+\hline
+\multicolumn{2}{c}{\textit{experiments/ 实验脚本}} \\
+\hline
+\texttt{exp1\_ctqw\_visualization.py}  & 实验一：CTQW 概率可视化 \\
+\texttt{exp2\_algorithm\_comparison.py}& 实验二：算法对比（核心） \\
+\texttt{exp3\_ablation.py}            & 实验三：消融实验 \\
+\texttt{exp4\_sensitivity.py}         & 实验四：参数敏感性 \\
+\texttt{exp5\_multi\_start.py}         & 实验五：MultiStart 种子选择 \\
+\texttt{exp6\_large\_scale\_approx.py} & 实验六：大规模近似对比 \\
+\texttt{exp6\_pre\_tune.py}            & Krylov/Chebyshev 参数调优 \\
+\texttt{run\_experiment.py}           & 通用实验运行器 \\
+\hline
+\multicolumn{2}{c}{\textit{datasets/ 数据集}} \\
+\hline
+\texttt{generate\_all.py}     & 一键生成全部人工实例 \\
+\texttt{generate\_misleading.py} & 度数误导图生成器 \\
+\texttt{converters/}         & DIMACS 等外部格式转换 \\
+\hline\hline
+\end{tabular}
+\end{table}
+
 \begin{thebibliography}{99}
 
 \bibitem{farhi1998}
