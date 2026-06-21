@@ -1,11 +1,12 @@
 .vscode/
-report/ppt/*.aux
-report/ppt/*.log
-report/ppt/*.nav
-report/ppt/*.out
-report/ppt/*.snm
-report/ppt/*.gz
-report/ppt/*.toc
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.gz
+*.toc
+*.bib
 
 
 # Byte-compiled / optimized / DLL files

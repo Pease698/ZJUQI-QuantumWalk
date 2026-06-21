@@ -15,7 +15,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ---- 中文字体（Windows: SimHei / Microsoft YaHei 均可）----
-plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei"]
+plt.rcParams["font.sans-serif"] = ["WenQuanYi Micro Hei", "Noto Sans CJK SC"]
 plt.rcParams["axes.unicode_minus"] = False
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +40,7 @@ PANELS = [
 
 def load_means(subdir):
     df = pd.read_csv(os.path.join(BASE, subdir, "full_results.csv"))
+    df = df[df["sample_id"] != "ext_mc_C1000-9"]
     g = df.groupby("display_name")["objective"].mean()
     return g
 

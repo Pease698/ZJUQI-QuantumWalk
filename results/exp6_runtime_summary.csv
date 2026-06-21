@@ -1,0 +1,10 @@
+﻿algorithm,内置式人工图,内置式外部图,外置式人工图,外置式外部图
+MS_CTQW_cheb_d50,,,0.86,118.1
+MS_CTQW_krylov_m30,,,0.43,118.96
+MS_Degree,,,0.33,119.21
+MS_Random,,,0.14,117.82
+ClassicalClique,0.08,17.48,0.1,9.52
+ClassicalDegree,0.01,0.36,,
+QuantumGreedy_cheb_d50,9.07,57.89,,
+QuantumGreedy_krylov_m30,0.98,23.72,,
+SimulatedAnnealing,0.18,2.38,,
